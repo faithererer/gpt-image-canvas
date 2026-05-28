@@ -23,6 +23,10 @@ export interface ProviderSourceDetails {
   baseUrl?: string;
   model?: string;
   timeoutMs?: number;
+  transport?: string;
+  responsesModel?: string;
+  responsesReasoningEffort?: string;
+  partialImages?: number;
   codex?: CodexAuthSessionView;
 }
 

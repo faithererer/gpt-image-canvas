@@ -37,6 +37,8 @@ Agent planning uses separate Agent LLM configuration. Do not assume the image pr
 
 Provider errors should become stable API errors where possible. Avoid exposing raw secrets, raw token values, or noisy upstream internals in responses or logs.
 
+OpenAI-compatible image providers can use either the Images API transport or Responses streaming transport. Use `OPENAI_IMAGE_TRANSPORT=responses` for sub2api-style providers that need `/v1/responses` streaming and `image_generation` tool routing. See `docs/PROVIDER_SETUP.md`.
+
 ## Image Generation
 
 - Text-to-image and reference-image generation both persist generation records.
@@ -76,7 +78,7 @@ For browser verification, run:
 pnpm dev
 ```
 
-Then open `http://localhost:5173`.
+Then open `http://localhost:5173`, or the configured `VITE_WEB_PORT` URL.
 
 For Docker config validation with real `.env` credentials, use:
 

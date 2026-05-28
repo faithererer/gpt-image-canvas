@@ -9,7 +9,8 @@
     "node": ">=24.15.0 <25"
   },
   "scripts": {
-    "dev": "concurrently -n api,web -c cyan,magenta \"pnpm api:dev\" \"pnpm web:dev\"",
+    "dev": "concurrently -n api,web -c cyan,magenta -k \"pnpm api:dev\" \"pnpm dev:web-after-api\"",
+    "dev:web-after-api": "node scripts/wait-for-api.mjs && pnpm web:dev",
     "api:dev": "pnpm --filter @gpt-image-canvas/api dev",
     "web:dev": "pnpm --filter @gpt-image-canvas/web dev",
     "build": "pnpm --filter @gpt-image-canvas/shared build && pnpm --filter @gpt-image-canvas/web build && pnpm --filter @gpt-image-canvas/api build",

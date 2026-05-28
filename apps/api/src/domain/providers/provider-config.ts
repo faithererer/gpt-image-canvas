@@ -17,6 +17,10 @@ import { db } from "../../infrastructure/database.js";
 import {
   DEFAULT_OPENAI_IMAGE_TIMEOUT_MS,
   getConfiguredImageModel,
+  getOpenAIImagePartialImages,
+  getOpenAIImageTransport,
+  getOpenAIResponsesReasoningEffort,
+  getOpenAIResponsesModel,
   parseOpenAIImageTimeoutMs,
   type OpenAIImageProviderConfig
 } from "../../infrastructure/providers/image-provider.js";
@@ -104,7 +108,11 @@ export function getEnvironmentOpenAIImageProviderConfig(): OpenAIImageProviderCo
     apiKey,
     baseURL: baseURL || undefined,
     model: getConfiguredImageModel(),
-    timeoutMs: parseOpenAIImageTimeoutMs(process.env.OPENAI_IMAGE_TIMEOUT_MS)
+    timeoutMs: parseOpenAIImageTimeoutMs(process.env.OPENAI_IMAGE_TIMEOUT_MS),
+    transport: getOpenAIImageTransport(),
+    responsesModel: getOpenAIResponsesModel(),
+    responsesReasoningEffort: getOpenAIResponsesReasoningEffort(),
+    partialImages: getOpenAIImagePartialImages()
   };
 }
 
@@ -119,7 +127,11 @@ export function getLocalOpenAIImageProviderConfig(): OpenAIImageProviderConfig |
     apiKey,
     baseURL: trimToUndefined(row?.localBaseUrl),
     model: trimToUndefined(row?.localModel) ?? IMAGE_MODEL,
-    timeoutMs: validTimeoutMs(row?.localTimeoutMs) ?? DEFAULT_OPENAI_IMAGE_TIMEOUT_MS
+    timeoutMs: validTimeoutMs(row?.localTimeoutMs) ?? DEFAULT_OPENAI_IMAGE_TIMEOUT_MS,
+    transport: getOpenAIImageTransport(),
+    responsesModel: getOpenAIResponsesModel(),
+    responsesReasoningEffort: getOpenAIResponsesReasoningEffort(),
+    partialImages: getOpenAIImagePartialImages()
   };
 }
 
@@ -150,7 +162,11 @@ function providerSources(row: ProviderConfigRow | undefined): ProviderSourceView
       details: {
         baseUrl: process.env.OPENAI_BASE_URL?.trim() || "",
         model: getConfiguredImageModel(),
-        timeoutMs: parseOpenAIImageTimeoutMs(process.env.OPENAI_IMAGE_TIMEOUT_MS)
+        timeoutMs: parseOpenAIImageTimeoutMs(process.env.OPENAI_IMAGE_TIMEOUT_MS),
+        transport: getOpenAIImageTransport(),
+        responsesModel: getOpenAIResponsesModel(),
+        responsesReasoningEffort: getOpenAIResponsesReasoningEffort(),
+        partialImages: getOpenAIImagePartialImages()
       },
       secret: maskedSecret(process.env.OPENAI_API_KEY)
     },
@@ -163,7 +179,11 @@ function providerSources(row: ProviderConfigRow | undefined): ProviderSourceView
       details: {
         baseUrl: row?.localBaseUrl ?? "",
         model: trimToUndefined(row?.localModel) ?? IMAGE_MODEL,
-        timeoutMs: validTimeoutMs(row?.localTimeoutMs) ?? DEFAULT_OPENAI_IMAGE_TIMEOUT_MS
+        timeoutMs: validTimeoutMs(row?.localTimeoutMs) ?? DEFAULT_OPENAI_IMAGE_TIMEOUT_MS,
+        transport: getOpenAIImageTransport(),
+        responsesModel: getOpenAIResponsesModel(),
+        responsesReasoningEffort: getOpenAIResponsesReasoningEffort(),
+        partialImages: getOpenAIImagePartialImages()
       },
       secret: maskedSecret(row?.localApiKey)
     },

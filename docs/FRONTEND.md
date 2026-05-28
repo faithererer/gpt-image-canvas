@@ -7,7 +7,7 @@ Use this document for work in `apps/web`, especially React, Vite, tldraw shapes,
 - `apps/web` is a Vite React app.
 - `packages/shared` owns shared contracts, constants, validation helpers, image presets, provider types, Agent events, and plan schema types.
 - `apps/api` is the source of API behavior. Do not duplicate server rules in the web app when a shared contract or endpoint response already exists.
-- The Vite dev server runs on `http://localhost:5173` and proxies `/api` to `http://127.0.0.1:8787`.
+- The Vite dev server defaults to `http://localhost:5173` and proxies `/api` to `http://127.0.0.1:8787`. Override with `VITE_WEB_PORT`, `PORT`, `HOST`, or `VITE_API_PROXY_TARGET` in the repository root `.env`; see `docs/PROVIDER_SETUP.md`.
 
 ## React Rules
 
@@ -56,7 +56,7 @@ Use this document for work in `apps/web`, especially React, Vite, tldraw shapes,
 For UI stories:
 
 1. Run `pnpm dev`.
-2. Open `http://localhost:5173`.
+2. Open `http://localhost:5173`, or the configured `VITE_WEB_PORT` URL.
 3. Verify the changed workflow in a browser.
 4. Check one desktop viewport and one mobile viewport.
 5. For canvas work, confirm selected references, generated placeholders, plan nodes, and asset previews render correctly.
