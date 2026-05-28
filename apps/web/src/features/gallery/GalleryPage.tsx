@@ -19,7 +19,7 @@ import {
   X,
   XCircle
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   SIZE_PRESETS,
   STYLE_PRESETS,
@@ -559,6 +559,7 @@ function FeaturedGalleryItem({
         <button
           aria-label={t("galleryActionOpenLatest", { excerpt: promptExcerpt(item.prompt) })}
           className="gallery-feature__image-button"
+          style={galleryImageRatioStyle(item)}
           type="button"
           onClick={() => onOpen(item)}
         >
@@ -642,6 +643,7 @@ function GalleryCard({
         <button
           aria-label={t("galleryActionOpenImage", { excerpt: promptExcerpt(item.prompt) })}
           className="gallery-card__image-button"
+          style={galleryImageRatioStyle(item)}
           type="button"
           onClick={() => onOpen(item)}
         >
@@ -997,6 +999,23 @@ function sizeTagLabel(item: GalleryImageItem, t: Translate): string {
   const preset = SIZE_PRESETS.find((sizePreset) => sizePreset.width === item.size.width && sizePreset.height === item.size.height);
   const presetLabel = preset ? t("sizePresetLabel", { presetId: preset.id, fallback: preset.label }) : t("customSize");
   return `${presetLabel} · ${item.size.width} x ${item.size.height}`;
+}
+
+type GalleryImageRatioStyle = CSSProperties & {
+  "--gallery-image-ratio": string;
+};
+
+function galleryImageRatioStyle(item: GalleryImageItem): GalleryImageRatioStyle {
+  const width = positiveDimension(item.asset.width) ?? positiveDimension(item.size.width) ?? 4;
+  const height = positiveDimension(item.asset.height) ?? positiveDimension(item.size.height) ?? 3;
+
+  return {
+    "--gallery-image-ratio": `${width} / ${height}`
+  };
+}
+
+function positiveDimension(value: number): number | undefined {
+  return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function promptExcerpt(promptValue: string): string {
