@@ -4,7 +4,6 @@ import { strFromU8, unzipSync } from "fflate";
 import {
   createCorePlanningSkill,
   createEcommercePlanningSkill,
-  hasEcommercePlanningIntent,
   type PlanningSkillLoadout,
   type PlanningSkillLoadoutSkill
 } from "./planning-skill.js";
@@ -177,7 +176,7 @@ export function importAgentSkillFromUpload(input: ImportUploadInput): ImportAgen
   });
 }
 
-export function resolvePlanningSkillLoadoutForRequest(userText: string): PlanningSkillLoadout {
+export function resolveAvailablePlanningSkillLoadout(): PlanningSkillLoadout {
   ensureBuiltInAgentSkills();
   const rows = db.select().from(agentSkills).orderBy(desc(agentSkills.required), desc(agentSkills.builtIn), asc(agentSkills.name)).all();
   const skills = rows.flatMap((row) => {
@@ -189,11 +188,7 @@ export function resolvePlanningSkillLoadoutForRequest(userText: string): Plannin
       return [];
     }
 
-    if (row.triggerMode === "always" || shouldTriggerSkill(row, userText)) {
-      return [toPlanningSkill(row)];
-    }
-
-    return [];
+    return [toPlanningSkill(row)];
   });
 
   return { skills };
@@ -461,19 +456,6 @@ function toPlanningSkill(row: AgentSkillRow): PlanningSkillLoadoutSkill {
       content: file.content
     }))
   };
-}
-
-function shouldTriggerSkill(row: AgentSkillRow, userText: string): boolean {
-  if (row.slug === "ecommerce-visual-copywriting" && hasEcommercePlanningIntent(userText)) {
-    return true;
-  }
-
-  const text = userText.trim().toLowerCase();
-  if (!text) {
-    return false;
-  }
-
-  return parseKeywordsJson(row.triggerKeywordsJson).some((keyword) => text.includes(keyword.toLowerCase()));
 }
 
 function toAgentSkillSummary(row: AgentSkillRow): AgentSkillSummary {

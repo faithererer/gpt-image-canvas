@@ -547,6 +547,10 @@
   color: #fff7ed;
 }
 
+.app-root[data-canvas-theme="dark"] .size-summary {
+  color: var(--muted-ink);
+}
+
 .app-root[data-canvas-theme="dark"] .segmented-control.is-active:hover {
   border-color: #d47b4f;
   background-color: #923b1f;

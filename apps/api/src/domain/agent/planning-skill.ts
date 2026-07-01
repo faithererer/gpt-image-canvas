@@ -8,10 +8,6 @@ export const ECOMMERCE_VISUAL_COPYWRITING_SKILL_PATH = "/skills/ecommerce-visual
 export const ECOMMERCE_VISUAL_COPYWRITING_COMPLIANCE_RULES_PATH =
   "/skills/ecommerce-visual-copywriting/references/compliance-rules.md" as const;
 
-export interface PlanningSkillSelection {
-  includeEcommerce: boolean;
-}
-
 export interface PlanningSkillFile {
   path: string;
   content: string;
@@ -28,37 +24,6 @@ export interface PlanningSkillLoadoutSkill {
 
 export interface PlanningSkillLoadout {
   skills: PlanningSkillLoadoutSkill[];
-}
-
-const DEFAULT_PLANNING_SKILL_SELECTION: PlanningSkillSelection = {
-  includeEcommerce: false
-};
-
-const ECOMMERCE_DIRECT_INTENT_PATTERN =
-  /e-?commerce|marketplace|listing|product\s+detail\s+page|\bpdp\b|\bsku\b|\bctr\b|shopify|amazon|taobao|tmall|jd\.?com|pinduoduo|douyin\s+shop|xiaohongshu|\u7535\u5546|\u6dd8\u5b9d|\u5929\u732b|\u4eac\u4e1c|\u62fc\u591a\u591a|\u6296\u97f3\u5c0f\u5e97|\u5c0f\u7ea2\u4e66|\u5e97\u94fa|\u5546\u8be6|\u8be6\u60c5\u9875|\u5546\u54c1\u8be6\u60c5|\u4e3b\u56fe|\u5546\u54c1\u4e3b\u56fe|\u5e7f\u544a\u6cd5|\u5e73\u53f0\u5ba1\u6838|\u5ba1\u6838\u5408\u89c4|\u654f\u611f\u8bcd/iu;
-const ECOMMERCE_PRODUCT_COPY_INTENT_PATTERN =
-  /(?:product|\bsku\b|\u5546\u54c1|\u4ea7\u54c1).{0,24}(?:copy|selling\s+point|listing|detail|marketplace|shop|store|compliance|\u6587\u6848|\u5356\u70b9|\u8be6\u60c5|\u5408\u89c4)|(?:copy|selling\s+point|\u6587\u6848|\u5356\u70b9).{0,24}(?:product|\bsku\b|\u5546\u54c1|\u4ea7\u54c1)/iu;
-
-export function createPlanningSkillSelectionForRequest(userText: string): PlanningSkillSelection {
-  return {
-    includeEcommerce: hasEcommercePlanningIntent(userText)
-  };
-}
-
-export function hasEcommercePlanningIntent(userText: string): boolean {
-  const text = userText.trim();
-  if (!text) {
-    return false;
-  }
-
-  return ECOMMERCE_DIRECT_INTENT_PATTERN.test(text) || ECOMMERCE_PRODUCT_COPY_INTENT_PATTERN.test(text);
-}
-
-function normalizePlanningSkillSelection(selection?: PlanningSkillSelection): PlanningSkillSelection {
-  return {
-    ...DEFAULT_PLANNING_SKILL_SELECTION,
-    ...selection
-  };
 }
 
 export const CANVAS_IMAGE_PLANNING_SKILL = `---
@@ -114,12 +79,20 @@ Core rules:
 
 Node planning patterns:
 
-Pattern A: selected-image edit
-- Use this when selected canvas references exist and the user asks to edit, modify, add text/captions/titles/copy, overlay typography, redesign, polish, retouch, or otherwise work on/from/based on selected or original image(s).
+Pattern A: selected-image direct edit
+- Use this when selected canvas references exist and the user asks to edit, modify, add text/captions/titles/copy, overlay typography, polish, retouch, or otherwise directly change selected or original image(s).
 - Every final_image job for that selected-image edit work must include at least one selected_canvas_image reference.
 - Prompts must say to edit the original image directly, preserve the scene/photo content, composition, perspective, and main subjects, and add only the requested design/text treatment.
 - Never make a blank poster, generic geometric template, unrelated background, or replacement image for this pattern.
 - If selected canvas references exist and this pattern applies, do not ask whether to edit the originals or create a new design. Assume the selected references are the edit sources and return a GenerationPlan.
+
+Pattern A2: selected-image creative reference
+- Use this when selected canvas references exist and the user asks to generate/create/make new images, portraits, style variants, or visual reinterpretations based on/reference/from an uploaded, selected, source, or original image.
+- Also use this when the user explicitly allows different pose, action, clothing, background, scene, composition, or style. In that case, do not force the original pose, action, composition, or scene into the prompt.
+- Every final_image job for this work must include the selected_canvas_image references used as subject, character, product, or style references.
+- For child, person, portrait, photoshoot, avatar, or identity-reference requests, set every selected_canvas_image reference usage to "subject" unless the user asks for a reusable story character, in which case "character" is also valid. Do not use usage "other" for identity or portrait references.
+- Prompts must say to use the selected image as a reference for the subject/identity/style and create a new image. Do not say "edit the original image", "preserve the pose", "preserve the composition", or "preserve the original scene" unless the user explicitly requests exact preservation.
+- Keep the referenced subject recognizable and do not replace it with an unrelated subject.
 
 Pattern B: batch selected-image edit
 - Use this when the user says each image, every image, all selected images, 每张图, 每一张, 所有图, 全部图片, or similar.
@@ -323,18 +296,10 @@ export const ECOMMERCE_VISUAL_COPYWRITING_COMPLIANCE_RULES = `# 电商文案合�
 8. 提交平台预审，通过后再正式上线。
 `;
 
-export function createBuiltInPlanningSkillLoadoutForRequest(userText: string): PlanningSkillLoadout {
-  return createBuiltInPlanningSkillLoadout(createPlanningSkillSelectionForRequest(userText));
-}
-
-export function createBuiltInPlanningSkillLoadout(selection?: PlanningSkillSelection): PlanningSkillLoadout {
-  const normalizedSelection = normalizePlanningSkillSelection(selection);
-  const skills = [createCorePlanningSkill()];
-  if (normalizedSelection.includeEcommerce) {
-    skills.push(createEcommercePlanningSkill());
-  }
-
-  return { skills };
+export function createBuiltInPlanningSkillLibraryLoadout(): PlanningSkillLoadout {
+  return {
+    skills: [createCorePlanningSkill(), createEcommercePlanningSkill()]
+  };
 }
 
 export function createCorePlanningSkill(): PlanningSkillLoadoutSkill {
@@ -373,21 +338,9 @@ export function createEcommercePlanningSkill(): PlanningSkillLoadoutSkill {
   };
 }
 
-export function createEmbeddedPlanningSkillsPrompt(input?: PlanningSkillLoadout | PlanningSkillSelection): string {
-  const loadout = normalizePlanningSkillLoadout(input);
-  const sections: string[] = [];
-  for (const skill of loadout.skills) {
-    for (const file of skill.files) {
-      sections.push(isSkillMarkdownFile(file.path) ? file.content : `# Reference: ${file.path}\n${file.content}`);
-    }
-  }
-
-  return sections.join("\n\n");
-}
-
 export function createPlanningSkillFiles(
   now = new Date(),
-  input?: PlanningSkillLoadout | PlanningSkillSelection
+  input?: PlanningSkillLoadout
 ): Record<string, FileData> {
   const timestamp = now.toISOString();
   const loadout = normalizePlanningSkillLoadout(input);
@@ -405,40 +358,45 @@ export function createPlanningSkillFiles(
   return files;
 }
 
-export function createPlanningSystemPrompt(input?: PlanningSkillLoadout | PlanningSkillSelection): string {
+export function createPlanningSystemPrompt(input?: PlanningSkillLoadout): string {
   const loadout = normalizePlanningSkillLoadout(input);
-  const activeSkillVersions = loadout.skills
+  const requiredSkillVersions = loadout.skills
+    .filter((skill) => skill.required)
+    .map((skill) => skill.version || skill.name || skill.slug)
+    .filter(Boolean)
+    .join(", ");
+  const optionalSkillVersions = loadout.skills
+    .filter((skill) => !skill.required)
     .map((skill) => skill.version || skill.name || skill.slug)
     .filter(Boolean)
     .join(", ");
   const lines = [
     "You are the gpt-image-canvas planning agent.",
-    `Use the active Agent skills: ${activeSkillVersions}.`,
+    `Required planning contract: ${requiredSkillVersions || CANVAS_IMAGE_PLANNING_SKILL_VERSION}.`,
+    optionalSkillVersions
+      ? `Additional Agent skills are available through the DeepAgents Skills System: ${optionalSkillVersions}. Match optional skills by their descriptions, read the relevant SKILL.md before using them, and ignore optional skills that do not fit the user request.`
+      : "No optional Agent skills are active for this request.",
     "Your only task is to produce strict GenerationPlan JSON for the canvas.",
-    "Do not call tools unless needed for your internal planning state.",
+    "Use DeepAgents native tools only when they help read skills, memory, or isolated planning context.",
     "Do not expose filesystem, shell, database, or environment details.",
     "Return exactly one JSON object that follows the skill schema."
   ];
 
   if (loadout.skills.some((skill) => skill.slug === "ecommerce-visual-copywriting")) {
     lines.splice(
-      2,
+      3,
       0,
-      `This request has explicit ecommerce, product listing, marketplace, or advertising-compliance intent; also use the built-in ${ECOMMERCE_VISUAL_COPYWRITING_SKILL_VERSION} skill.`
+      `The ${ECOMMERCE_VISUAL_COPYWRITING_SKILL_VERSION} skill is available. Use it only when the request actually involves ecommerce, product listings, marketplace imagery, or advertising compliance.`
     );
   }
 
   return lines.join("\n");
 }
 
-function normalizePlanningSkillLoadout(input?: PlanningSkillLoadout | PlanningSkillSelection): PlanningSkillLoadout {
+function normalizePlanningSkillLoadout(input?: PlanningSkillLoadout): PlanningSkillLoadout {
   if (input && "skills" in input && Array.isArray(input.skills)) {
     return input;
   }
 
-  return createBuiltInPlanningSkillLoadout(input && "includeEcommerce" in input ? input : undefined);
-}
-
-function isSkillMarkdownFile(path: string): boolean {
-  return path.endsWith("/SKILL.md") || path === "SKILL.md";
+  return createBuiltInPlanningSkillLibraryLoadout();
 }

@@ -35,6 +35,8 @@ export type {
   GenerateImageRequest,
   GeneratedAsset,
   GeneratedAssetCloudInfo,
+  GalleryBatchDeleteRequest,
+  GalleryAssetDeleteRequest,
   GalleryExportRequest,
   GalleryImageItem,
   GalleryResponse,

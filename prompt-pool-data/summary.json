@@ -1,16 +1,65 @@
 {
-  "builtAt": "2026-05-21T15:16:10.318Z",
+  "builtAt": "2026-06-06T11:20:00.884Z",
+  "sourceDir": "E:\\image-garllery-wesite\\meigen_export_merged_20260606",
   "rawBase": "https://raw.githubusercontent.com/mrslimslim/awesome-prompt/main",
-  "promptCount": 2968,
-  "imagePromptCount": 2841,
-  "videoPromptCount": 127,
-  "assetCount": 5365,
-  "sourceSummary": {
-    "siteUrl": "https://www.meigen.ai/",
-    "imagePromptCount": 2841,
-    "videoPromptCount": 127,
-    "allPromptCount": 2968,
-    "assetTaskCount": 5365
+  "quality": 76,
+  "maxDimension": 1280,
+  "promptCount": 3441,
+  "imagePromptCount": 3302,
+  "videoPromptCount": 139,
+  "assetCount": 6116,
+  "compression": {
+    "completed": 6116,
+    "failed": 0,
+    "skipped": 6116,
+    "sourceBytes": 1973713418,
+    "outputBytes": 555402916,
+    "savedBytes": 1418310502,
+    "outputRatio": 0.2814
   },
-  "dataSha256": "d251f57c47c515cca8da804d23a1978081bc7b7738573cffaaf0b529ce304ca6"
+  "sourceSummary": {
+    "scrapedAt": "2026-06-06T11:14:18.094Z",
+    "siteUrl": "https://www.meigen.ai/",
+    "browserScrollLatestCount": 2733,
+    "imagePromptCount": 3302,
+    "videoPromptCount": 139,
+    "allPromptCount": 3441,
+    "assetTaskCount": 6116,
+    "downloadSummary": {
+      "completed": 5200,
+      "downloaded": 560,
+      "skipped": 4640,
+      "failed": 0,
+      "bytes": 900455460,
+      "failures": []
+    },
+    "files": {
+      "imageJsonPath": "E:\\image-garllery-wesite\\meigen_export_merged_20260606\\prompts-images.json",
+      "videoJsonPath": "E:\\image-garllery-wesite\\meigen_export_merged_20260606\\prompts-videos.json",
+      "allJsonPath": "E:\\image-garllery-wesite\\meigen_export_merged_20260606\\prompts-all.json",
+      "csvPath": "E:\\image-garllery-wesite\\meigen_export_merged_20260606\\prompts-all.csv",
+      "imageDir": "E:\\image-garllery-wesite\\meigen_export_merged_20260606\\images",
+      "videoThumbDir": "E:\\image-garllery-wesite\\meigen_export_merged_20260606\\video-thumbnails"
+    },
+    "mergedArchive": {
+      "mergedAt": "2026-06-06T11:19:53.072Z",
+      "previousBuiltAt": "2026-05-29T13:26:25.495Z",
+      "previousPromptCount": 3075,
+      "currentScrapedPromptCount": 2924,
+      "currentDisplayablePromptCount": 2922,
+      "noAssetPromptCount": 2,
+      "noAssetPromptIds": [
+        "community_4ebcc069-0488-44ce-9f16-6dc04ab0bb9b",
+        "community_a1200362-fae9-46e0-b2ed-382c9fa517ff"
+      ],
+      "overlapPromptCount": 2556,
+      "addedPromptCount": 366,
+      "addedImagePromptCount": 362,
+      "addedVideoPromptCount": 4,
+      "carriedOverPromptCount": 519,
+      "carriedOverImagePromptCount": 519,
+      "carriedOverVideoPromptCount": 0
+    }
+  },
+  "dataSha256": "3e7c9b1105b5ef3bb867246d03a9c672e116ccf08ba4a69d567d654408a60941"
 }

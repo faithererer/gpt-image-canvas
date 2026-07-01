@@ -227,3 +227,11 @@ export interface GalleryResponse {
 export interface GalleryExportRequest {
   outputIds: string[];
 }
+
+export interface GalleryBatchDeleteRequest {
+  outputIds: string[];
+}
+
+export interface GalleryAssetDeleteRequest {
+  assetIds: string[];
+}

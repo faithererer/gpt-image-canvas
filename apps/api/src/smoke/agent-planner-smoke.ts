@@ -1,10 +1,13 @@
+import http from "node:http";
 import {
+  DEEPAGENT_PLANNING_MEMORY_PATH,
   agentModelKwargsForConfig,
   buildPlannerUserMessage,
-  createDirectChatPlanner,
   createGenerationPlan,
+  createPlanningMemoryFiles,
   extractReasoningFromAgentResult,
   parseGenerationPlanModelOutput,
+  patchDeepSeekReasoningContentForRequest,
   type AgentPlannerResult,
   validateGenerationPlan
 } from "../domain/agent/planner.js";
@@ -12,8 +15,7 @@ import {
   CANVAS_IMAGE_PLANNING_SKILL_PATH,
   ECOMMERCE_VISUAL_COPYWRITING_COMPLIANCE_RULES_PATH,
   ECOMMERCE_VISUAL_COPYWRITING_SKILL_PATH,
-  createBuiltInPlanningSkillLoadoutForRequest,
-  hasEcommercePlanningIntent,
+  createCorePlanningSkill,
   type PlanningSkillLoadout
 } from "../domain/agent/planning-skill.js";
 import type { UsableAgentLlmConfig } from "../domain/agent/config.js";
@@ -45,6 +47,8 @@ const selectedReferences: AgentSelectedCanvasReference[] = [
     dataUrl: "data:image/png;base64,AAAA"
   }
 ];
+const creativeReferenceUserText =
+  "\u57fa\u4e8e\u4e0a\u4f20\u56fe\u7247\u751f\u62103\u5f20\u513f\u7ae5\u827a\u672f\u5199\u771f\uff0c\u4e0d\u62d8\u6ce5\u4e8e\u52a8\u4f5c\u548c\u59ff\u52bf\uff0c\u53ef\u7231\u98ce\u548c\u5947\u5e7b\u98ce\u3002";
 
 async function main(): Promise<void> {
   smokeValidSimplePlan();
@@ -60,15 +64,16 @@ async function main(): Promise<void> {
   smokeCyclePlanRejection();
   smokeInvalidJsonRejection();
   smokeNoVisionReferenceHandling();
+  smokeCreativeReferencePlannerMessage();
   smokePlannerConversationContextPrompt();
-  smokeEcommerceSkillIntentDetection();
+  await smokePlannerInjectsDeepAgentMemory();
   smokeDeepSeekPlannerKwargs();
+  await smokeDeepSeekReasoningContentRoundTripThroughDeepAgent();
   smokeReasoningExtraction();
-  await smokeNonEcommerceRequestLoadsOnlyCanvasSkill();
+  await smokeDefaultPlannerReceivesBuiltInSkillLibrary();
   await smokeEcommerceRequestLoadsEcommerceSkill();
   await smokeDisabledEcommerceSkillIsNotInjected();
   await smokeCustomLoadoutSkillIsInjected();
-  await smokeDirectPlannerUsesSelectedSkills();
   await smokePlannerQuestionOutput();
   await smokeMissingSelectedReferenceQuestion();
   await smokeStandaloneTextImageWithImageCopyDoesNotRequireReference();
@@ -78,16 +83,14 @@ async function main(): Promise<void> {
   await smokePerImageSelectedReferencePlan();
   await smokeBatchSelectedReferenceFallbackUsesAllReferences();
   await smokeSelectedVariantFallbackPreservesExplicitCount();
+  await smokeCreativeReferenceFallbackAvoidsDirectEditLanguage();
+  await smokeCreativeReferenceUsageOtherCanonicalized();
   await smokePlannerReflectsOnDroppedExplicitCount();
   await smokeSingleCombinedSelectedReferenceLimitQuestion();
   await smokeRecentOutputEditWithoutReferencesStillAsks();
   await smokeCombinedSelectedReferencePlan();
   await smokePlannerReflectsOnWrappedOutput();
   await smokePlannerReflectsOnInvalidPlan();
-  await smokeDirectPlannerStreamingSuccess();
-  await smokeDirectPlannerCancellation();
-  await smokeDirectPlannerInvalidJson();
-  await smokeDirectPlannerTransportError();
   smokeModelJobSizeCoercion();
   smokeModelArbitraryFinalJobCount();
   smokeModelArbitraryDefaultCount();
@@ -395,6 +398,24 @@ function smokeNoVisionReferenceHandling(): void {
   expect(message.content.includes("Do not claim visual inspection"), "no-vision message includes inspection warning");
 }
 
+function smokeCreativeReferencePlannerMessage(): void {
+  const message = buildPlannerUserMessage({
+    userText: creativeReferenceUserText,
+    defaults,
+    selectedReferences,
+    supportsVision: false
+  });
+  const content = typeof message.content === "string" ? message.content : "";
+
+  expect(content.includes("Selected-image creative reference mode"), "creative reference requests get reference guidance");
+  expect(content.includes("create a new image"), "creative reference guidance asks for a new image");
+  expect(content.includes('usage "subject"'), "creative reference guidance requires subject usage for identity references");
+  expect(
+    !content.includes("Prompts must say to edit the original directly"),
+    "creative reference guidance avoids direct edit instructions"
+  );
+}
+
 function smokePlannerConversationContextPrompt(): void {
   const message = buildPlannerUserMessage({
     userText: "Make image 3 text bigger.",
@@ -468,24 +489,55 @@ function smokePlannerConversationContextPrompt(): void {
   );
 }
 
-function smokeEcommerceSkillIntentDetection(): void {
+async function smokePlannerInjectsDeepAgentMemory(): Promise<void> {
+  const conversationContext = {
+    previousUserText: "Generate 10 Guangdong food images.",
+    previousPlan: planFixture({
+      id: "plan-food",
+      title: "Guangdong food batch"
+    }) as unknown as GenerationPlan,
+    previousOutputs: [
+      {
+        index: 3,
+        assetId: "asset-output-3",
+        label: "dish-3.png"
+      }
+    ],
+    resolvedReferences: [
+      {
+        index: 3,
+        assetId: "asset-output-3",
+        label: "dish-3.png"
+      }
+    ],
+    referenceResolution: "previous_agent_outputs" as const
+  };
+  const memoryFiles = createPlanningMemoryFiles(now, {
+    userText: "Make image 3 text bigger.",
+    conversationContext
+  });
+  expect(DEEPAGENT_PLANNING_MEMORY_PATH in memoryFiles, "DeepAgent memory file is created");
+  const directMemoryText = fileDataText(memoryFiles[DEEPAGENT_PLANNING_MEMORY_PATH]);
+  expect(directMemoryText.includes("Current Agent conversation context"), "DeepAgent memory includes context heading");
+  expect(directMemoryText.includes("asset-output-3"), "DeepAgent memory includes resolved output reference");
+
+  const runner = capturingPlannerRunner(planFixture());
+  const result = await createGenerationPlan({
+    userText: "Make image 3 text bigger.",
+    defaults,
+    selectedReferences: [],
+    conversationContext,
+    llmConfig: llmConfigFixture(),
+    now,
+    runner
+  });
+  expectPlannerOk(result, "planner with DeepAgent memory injection");
+  const files = runner.calls[0]?.files;
+  expect(isRecord(files), "planner runner receives virtual files");
+  expect(DEEPAGENT_PLANNING_MEMORY_PATH in files, "planner runner receives DeepAgent memory file");
   expect(
-    !hasEcommercePlanningIntent("Create a clean product photography render."),
-    "product photography alone does not trigger ecommerce skill"
-  );
-  expect(
-    !createBuiltInPlanningSkillLoadoutForRequest("Add a short title to each selected image.").skills.some(
-      (skill) => skill.slug === "ecommerce-visual-copywriting"
-    ),
-    "generic image text edits do not trigger ecommerce skill"
-  );
-  expect(
-    hasEcommercePlanningIntent("Create marketplace listing copy for this SKU."),
-    "marketplace listing requests trigger ecommerce skill"
-  );
-  expect(
-    hasEcommercePlanningIntent("\u6dd8\u5b9d\u4e3b\u56fe\u6587\u6848"),
-    "Chinese marketplace main-image copy requests trigger ecommerce skill"
+    fileDataText(files[DEEPAGENT_PLANNING_MEMORY_PATH]).includes("Previous user request: Generate 10 Guangdong food images."),
+    "planner DeepAgent memory preserves previous user text"
   );
 }
 
@@ -495,8 +547,8 @@ function smokeDeepSeekPlannerKwargs(): void {
     model: "deepseek-v4-pro"
   });
 
-  expect(isRecord(kwargs.extra_body), "DeepSeek planner includes extra_body");
-  expect(isRecord(kwargs.extra_body.thinking), "DeepSeek planner enables thinking");
+  expect(isRecord(kwargs.thinking), "DeepSeek planner enables thinking with top-level OpenAI-compatible body param");
+  expect(kwargs.thinking.type === "enabled", "DeepSeek planner enables thinking");
   expect(kwargs.reasoning_effort === "high", "DeepSeek planner sets high reasoning effort");
 
   const maxKwargs = agentModelKwargsForConfig(
@@ -510,9 +562,8 @@ function smokeDeepSeekPlannerKwargs(): void {
     }
   );
   expect(
-    isRecord(maxKwargs.extra_body) &&
-      isRecord(maxKwargs.extra_body.thinking) &&
-      maxKwargs.extra_body.thinking.type === "enabled",
+    isRecord(maxKwargs.thinking) &&
+      maxKwargs.thinking.type === "enabled",
     "DeepSeek planner keeps thinking enabled"
   );
   expect(maxKwargs.reasoning_effort === "max", "DeepSeek planner accepts max reasoning effort");
@@ -528,17 +579,209 @@ function smokeDeepSeekPlannerKwargs(): void {
     }
   );
   expect(
-    isRecord(disabledKwargs.extra_body) &&
-      isRecord(disabledKwargs.extra_body.thinking) &&
-      disabledKwargs.extra_body.thinking.type === "disabled",
+    isRecord(disabledKwargs.thinking) &&
+      disabledKwargs.thinking.type === "disabled",
     "DeepSeek planner can disable thinking"
   );
   expect(!("reasoning_effort" in disabledKwargs), "disabled thinking omits reasoning effort");
+
+  const reasoningByToolCallId = new Map<string, string>();
+  const patchedRequest = patchDeepSeekReasoningContentForRequest(
+    {
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: {
+                name: "read_file",
+                arguments: "{}"
+              }
+            }
+          ]
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: "tool result"
+        }
+      ]
+    },
+    [
+      {
+        additional_kwargs: {
+          reasoning_content: "I need to inspect the skill file before planning."
+        }
+      },
+      {}
+    ],
+    reasoningByToolCallId
+  );
+  const patchedMessages = patchedRequest.messages;
+  expect(
+    Array.isArray(patchedMessages) &&
+      isRecord(patchedMessages[0]) &&
+      patchedMessages[0].reasoning_content === "I need to inspect the skill file before planning.",
+    "DeepAgent loop preserves DeepSeek reasoning_content for tool-call turns"
+  );
+  const replayedRequest = patchDeepSeekReasoningContentForRequest(
+    {
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: {
+                name: "read_file",
+                arguments: "{}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    [{}],
+    reasoningByToolCallId
+  );
+  const replayedMessages = replayedRequest.messages;
+  expect(
+    Array.isArray(replayedMessages) &&
+      isRecord(replayedMessages[0]) &&
+      replayedMessages[0].reasoning_content === "I need to inspect the skill file before planning.",
+    "DeepAgent loop replays DeepSeek reasoning_content on later requests by tool call id"
+  );
 
   const openAIKwargs = agentModelKwargsForConfig({
     model: "gpt-4.1-mini"
   });
   expect(Object.keys(openAIKwargs).length === 0, "OpenAI planner kwargs are unchanged");
+}
+
+async function smokeDeepSeekReasoningContentRoundTripThroughDeepAgent(): Promise<void> {
+  const requests: Array<Record<string, unknown>> = [];
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk;
+    });
+    req.on("end", () => {
+      const body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
+      requests.push(body);
+      const missingReasoning = requestAssistantToolMessages(body).find(
+        (message) => typeof message.reasoning_content !== "string" || message.reasoning_content.length === 0
+      );
+      if (requests.length > 1 && missingReasoning) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "missing reasoning_content in fake DeepSeek" } }));
+        return;
+      }
+
+      if (requests.length === 1) {
+        writeFakeDeepSeekStream(res, [
+          fakeDeepSeekChunk({
+            role: "assistant",
+            reasoning_content: "Need to create todos before final planning.",
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_todos",
+                type: "function",
+                function: {
+                  name: "write_todos",
+                  arguments: JSON.stringify({
+                    todos: [{ content: "Draft image plan", status: "in_progress" }]
+                  })
+                }
+              }
+            ]
+          }),
+          fakeDeepSeekChunk({}, "tool_calls")
+        ]);
+        return;
+      }
+
+      writeFakeDeepSeekStream(res, [
+        fakeDeepSeekChunk({
+          role: "assistant",
+          content: JSON.stringify(planFixture())
+        }),
+        fakeDeepSeekChunk({}, "stop")
+      ]);
+    });
+  });
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    const result = await createGenerationPlan({
+      userText: "Create one image.",
+      defaults,
+      selectedReferences: [],
+      llmConfig: {
+        apiKey: "test-key",
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        model: "deepseek-v4-pro",
+        timeoutMs: 10_000,
+        supportsVision: false
+      },
+      now
+    });
+
+    expectPlannerOk(result, "DeepSeek reasoning_content round trip through DeepAgent");
+    expect(isRecord(requests[0]?.thinking), "DeepAgent sends DeepSeek thinking as a top-level request body field");
+    expect(
+      requestAssistantToolMessages(requests[1]).some(
+        (message) => message.reasoning_content === "Need to create todos before final planning."
+      ),
+      "DeepAgent returns reasoning_content after tool-call turns"
+    );
+  } finally {
+    server.close();
+  }
+}
+
+function requestAssistantToolMessages(request: Record<string, unknown> | undefined): Array<Record<string, unknown>> {
+  const messages = request?.messages;
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+
+  return messages.filter(
+    (message): message is Record<string, unknown> =>
+      isRecord(message) && message.role === "assistant" && Array.isArray(message.tool_calls)
+  );
+}
+
+function writeFakeDeepSeekStream(res: http.ServerResponse, chunks: Array<Record<string, unknown>>): void {
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  for (const chunk of chunks) {
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+  }
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
+function fakeDeepSeekChunk(delta: Record<string, unknown>, finishReason: string | null = null): Record<string, unknown> {
+  return {
+    id: "chatcmpl-smoke",
+    object: "chat.completion.chunk",
+    created: 0,
+    model: "deepseek-v4-pro",
+    choices: [
+      {
+        index: 0,
+        delta,
+        finish_reason: finishReason
+      }
+    ]
+  };
 }
 
 function smokeReasoningExtraction(): void {
@@ -556,7 +799,7 @@ function smokeReasoningExtraction(): void {
   expect(reasoning === "I should split the request into four scenes.", "reasoning content is extracted");
 }
 
-async function smokeNonEcommerceRequestLoadsOnlyCanvasSkill(): Promise<void> {
+async function smokeDefaultPlannerReceivesBuiltInSkillLibrary(): Promise<void> {
   const runner = capturingPlannerRunner(planFixture());
   const result = await createGenerationPlan({
     userText: "Create a clean product photography render.",
@@ -567,17 +810,14 @@ async function smokeNonEcommerceRequestLoadsOnlyCanvasSkill(): Promise<void> {
     runner
   });
 
-  expectPlannerOk(result, "non-ecommerce planner request");
+  expectPlannerOk(result, "default planner skill library request");
   const files = runner.calls[0]?.files;
-  expect(isRecord(files), "non-ecommerce planner receives skill files");
-  expect(CANVAS_IMAGE_PLANNING_SKILL_PATH in files, "non-ecommerce planner receives canvas skill");
+  expect(isRecord(files), "default planner receives skill files");
+  expect(CANVAS_IMAGE_PLANNING_SKILL_PATH in files, "default planner receives canvas skill");
+  expect(ECOMMERCE_VISUAL_COPYWRITING_SKILL_PATH in files, "default planner exposes ecommerce skill for model-side matching");
   expect(
-    !(ECOMMERCE_VISUAL_COPYWRITING_SKILL_PATH in files),
-    "non-ecommerce planner does not receive ecommerce skill"
-  );
-  expect(
-    !(ECOMMERCE_VISUAL_COPYWRITING_COMPLIANCE_RULES_PATH in files),
-    "non-ecommerce planner does not receive ecommerce compliance rules"
+    ECOMMERCE_VISUAL_COPYWRITING_COMPLIANCE_RULES_PATH in files,
+    "default planner exposes ecommerce compliance rules for model-side matching"
   );
 }
 
@@ -612,7 +852,9 @@ async function smokeDisabledEcommerceSkillIsNotInjected(): Promise<void> {
     llmConfig: llmConfigFixture(),
     now,
     runner,
-    skillLoadout: createBuiltInPlanningSkillLoadoutForRequest("Create a clean product render.")
+    skillLoadout: {
+      skills: [createCorePlanningSkill()]
+    }
   });
 
   expectPlannerOk(result, "disabled ecommerce planner request");
@@ -629,7 +871,7 @@ async function smokeCustomLoadoutSkillIsInjected(): Promise<void> {
   const runner = capturingPlannerRunner(planFixture());
   const skillLoadout: PlanningSkillLoadout = {
     skills: [
-      ...createBuiltInPlanningSkillLoadoutForRequest("Create a clean product render.").skills,
+      createCorePlanningSkill(),
       {
         slug: "brand-voice",
         name: "brand-voice",
@@ -659,54 +901,6 @@ async function smokeCustomLoadoutSkillIsInjected(): Promise<void> {
   const files = runner.calls[0]?.files;
   expect(isRecord(files), "custom skill planner receives skill files");
   expect("/skills/brand-voice/SKILL.md" in files, "custom loadout skill is injected");
-}
-
-async function smokeDirectPlannerUsesSelectedSkills(): Promise<void> {
-  const nonEcommerceModel = capturingStreamingModel([JSON.stringify(planFixture())]);
-  const nonEcommerceRunner = createDirectChatPlanner(
-    nonEcommerceModel,
-    createBuiltInPlanningSkillLoadoutForRequest("Create a clean product photography render.")
-  );
-  await nonEcommerceRunner.invoke({
-    messages: [
-      buildPlannerUserMessage({
-        userText: "Create a clean product photography render.",
-        defaults,
-        selectedReferences: [],
-        supportsVision: false
-      })
-    ]
-  });
-  const nonEcommerceSystemPrompt = firstSystemPrompt(nonEcommerceModel.calls[0]);
-  expect(
-    !nonEcommerceSystemPrompt.includes("ecommerce-visual-copywriting"),
-    "direct planner omits ecommerce skill from non-ecommerce system prompt"
-  );
-
-  const ecommerceModel = capturingStreamingModel([JSON.stringify(planFixture())]);
-  const ecommerceRunner = createDirectChatPlanner(
-    ecommerceModel,
-    createBuiltInPlanningSkillLoadoutForRequest("Create marketplace listing copy for this SKU.")
-  );
-  await ecommerceRunner.invoke({
-    messages: [
-      buildPlannerUserMessage({
-        userText: "Create marketplace listing copy for this SKU.",
-        defaults,
-        selectedReferences: [],
-        supportsVision: false
-      })
-    ]
-  });
-  const ecommerceSystemPrompt = firstSystemPrompt(ecommerceModel.calls[0]);
-  expect(
-    ecommerceSystemPrompt.includes("ecommerce-visual-copywriting"),
-    "direct planner includes ecommerce skill for ecommerce system prompt"
-  );
-  expect(
-    ecommerceSystemPrompt.includes(ECOMMERCE_VISUAL_COPYWRITING_COMPLIANCE_RULES_PATH),
-    "direct planner includes ecommerce compliance reference for ecommerce system prompt"
-  );
 }
 
 async function smokePlannerQuestionOutput(): Promise<void> {
@@ -933,6 +1127,119 @@ async function smokeSelectedVariantFallbackPreservesExplicitCount(): Promise<voi
   );
 }
 
+async function smokeCreativeReferenceFallbackAvoidsDirectEditLanguage(): Promise<void> {
+  const result = await createGenerationPlan({
+    userText: creativeReferenceUserText,
+    defaults,
+    selectedReferences,
+    llmConfig: llmConfigFixture(),
+    now,
+    runner: staticPlannerRunner(
+      planFixture({
+        jobs: [
+          jobFixture({
+            id: "overly_literal_edit",
+            prompt:
+              "Edit the original image into a fantasy portrait while preserving the child pose, composition, and original scene.",
+            count: 3,
+            references: [
+              {
+                kind: "selected_canvas_image",
+                usage: "scene",
+                assetId: "ref1"
+              }
+            ]
+          })
+        ]
+      })
+    )
+  });
+
+  expectPlannerOk(result, "creative reference fallback avoids direct edit language");
+  expect(result.plan.jobs.length === 3, "creative reference fallback creates three distinct jobs");
+  expect(
+    result.plan.jobs.every((job) => job.references[0]?.usage === "subject"),
+    "creative reference fallback marks selected references as subject references"
+  );
+  expect(
+    result.plan.jobs.every(
+      (job) =>
+        !/edit the original image|preserve the original image content|preserv(?:e|ing) (?:the )?(?:original )?(?:pose|composition|scene)/iu.test(
+          job.prompt
+        )
+    ),
+    "creative reference fallback prompts avoid direct-edit preservation wording"
+  );
+  expect(
+    result.plan.jobs.every((job) => /new image|variant/iu.test(job.prompt)),
+    "creative reference fallback prompts ask for new images"
+  );
+}
+
+async function smokeCreativeReferenceUsageOtherCanonicalized(): Promise<void> {
+  const runner = sequencedPlannerRunner([
+    planFixture({
+      createdAt: "2025-07-17T00:00:00.000Z",
+      updatedAt: "2025-07-17T00:00:00.000Z",
+      jobs: [
+        jobFixture({
+          id: "fantasy_fairy_forest",
+          prompt:
+            "Use the uploaded selected image as the child identity reference and create a new cute fantasy portrait in a fairy forest.",
+          references: [
+            {
+              kind: "selected_canvas_image",
+              usage: "other",
+              assetId: "ref1"
+            }
+          ]
+        }),
+        jobFixture({
+          id: "dreamy_cloud_castle",
+          prompt:
+            "Use the uploaded selected image as the child identity reference and create a new dreamy cloud castle portrait.",
+          references: [
+            {
+              kind: "selected_canvas_image",
+              usage: "other",
+              assetId: "ref1"
+            }
+          ]
+        }),
+        jobFixture({
+          id: "magical_enchanted_garden",
+          prompt:
+            "Use the uploaded selected image as the child identity reference and create a new enchanted garden portrait.",
+          references: [
+            {
+              kind: "selected_canvas_image",
+              usage: "other",
+              assetId: "ref1"
+            }
+          ]
+        })
+      ]
+    })
+  ]);
+  const result = await createGenerationPlan({
+    userText: creativeReferenceUserText,
+    defaults,
+    selectedReferences,
+    llmConfig: llmConfigFixture(),
+    now,
+    runner
+  });
+
+  expectPlannerOk(result, "creative reference usage is canonicalized");
+  expect(runner.calls.length === 1, "usage canonicalization avoids a reflection retry");
+  expect(
+    result.plan.jobs.every((job) => job.references[0]?.usage === "subject"),
+    "creative portrait references with usage other are converted to subject"
+  );
+  expect(result.plan.createdAt === now.toISOString(), "model-created plan timestamp is replaced with server time");
+  expect(result.plan.updatedAt === now.toISOString(), "model-updated plan timestamp is replaced with server time");
+}
+
 async function smokePlannerReflectsOnDroppedExplicitCount(): Promise<void> {
   const runner = sequencedPlannerRunner([
     planFixture({
@@ -1105,155 +1412,6 @@ async function smokePlannerReflectsOnInvalidPlan(): Promise<void> {
     typeof retryMessage.content === "string" && retryMessage.content.includes("GenerationPlan must include at least one job."),
     "reflection prompt includes validation details"
   );
-}
-
-async function smokeDirectPlannerStreamingSuccess(): Promise<void> {
-  const assistantDeltas: string[] = [];
-  const thinkingDeltas: string[] = [];
-  const planJson = JSON.stringify(
-    planFixture({
-      id: "streamed-plan",
-      jobs: [
-        jobFixture({
-          id: "streamed-final",
-          prompt: "Create one polished hero image with soft lighting."
-        })
-      ]
-    })
-  );
-  const splitAt = Math.floor(planJson.length / 2);
-  const result = await createGenerationPlan({
-    userText: "Create a polished hero image.",
-    defaults,
-    selectedReferences: [],
-    llmConfig: llmConfigFixture(),
-    now,
-    runner: createDirectChatPlanner(
-      streamingModel([
-        {
-          reasoning_content: "I should turn the request into one final image."
-        },
-        {
-          content: planJson.slice(0, splitAt)
-        },
-        {
-          additional_kwargs: {
-            reasoning: {
-              text: "Defaults fit the requested square render."
-            }
-          }
-        },
-        {
-          content: [
-            {
-              type: "text",
-              text: planJson.slice(splitAt)
-            }
-          ]
-        },
-        {
-          response_metadata: {
-            reasoning_content: "The plan JSON is complete."
-          }
-        }
-      ])
-    ),
-    onAssistantDelta: (delta) => assistantDeltas.push(delta),
-    onThinkingDelta: (delta) => thinkingDeltas.push(delta)
-  });
-
-  expectPlannerOk(result, "streamed direct planner");
-  expect(result.plan.id.startsWith("plan-"), "streamed planner assigns a server plan id");
-  expect(result.plan.id !== "streamed-plan", "streamed planner does not reuse the model's temporary plan id");
-  expect(result.plan.jobs[0]?.id === "streamed-final", "streamed planner parses final content chunks");
-  expect(thinkingDeltas.length === 3, "streamed planner emits reasoning deltas from chunk fields");
-  expect(
-    thinkingDeltas.includes("I should turn the request into one final image."),
-    "top-level reasoning_content chunk is emitted"
-  );
-  expect(
-    thinkingDeltas.includes("Defaults fit the requested square render."),
-    "additional_kwargs reasoning chunk is emitted"
-  );
-  expect(thinkingDeltas.includes("The plan JSON is complete."), "response_metadata reasoning chunk is emitted");
-  expect(assistantDeltas.length >= 2, "streamed planner emits human status before and after planning");
-  expect(!assistantDeltas.join("").includes("schemaVersion"), "streamed planner does not emit raw JSON as assistant text");
-}
-
-async function smokeDirectPlannerCancellation(): Promise<void> {
-  const controller = new AbortController();
-  const thinkingDeltas: string[] = [];
-  const planJson = JSON.stringify(planFixture({ id: "cancelled-streamed-plan" }));
-  const result = await createGenerationPlan({
-    userText: "Create one image, then cancel.",
-    defaults,
-    selectedReferences: [],
-    llmConfig: llmConfigFixture(),
-    now,
-    signal: controller.signal,
-    runner: createDirectChatPlanner(
-      streamingModel([
-        {
-          reasoning_content: "Cancellation should stop before plan JSON is accepted."
-        },
-        {
-          content: planJson
-        }
-      ])
-    ),
-    onThinkingDelta: (delta) => {
-      thinkingDeltas.push(delta);
-      controller.abort();
-    }
-  });
-
-  expect(!result.ok, "cancelled streamed planner returns a failure");
-  expect(result.code === "agent_run_cancelled", "cancelled streamed planner uses the cancellation code");
-  expect(thinkingDeltas.length === 1, "cancelled streamed planner emitted the first reasoning chunk");
-}
-
-async function smokeDirectPlannerInvalidJson(): Promise<void> {
-  const assistantDeltas: string[] = [];
-  const result = await createGenerationPlan({
-    userText: "Create one image with invalid streamed JSON.",
-    defaults,
-    selectedReferences: [],
-    llmConfig: llmConfigFixture(),
-    now,
-    runner: createDirectChatPlanner(
-      streamingModel([
-        {
-          content: "not "
-        },
-        {
-          content: "json"
-        }
-      ])
-    ),
-    onAssistantDelta: (delta) => assistantDeltas.push(delta)
-  });
-
-  expect(!result.ok, "invalid streamed JSON returns a failure");
-  expect(result.code === "invalid_plan_json", "invalid streamed JSON uses the JSON error code");
-  expect(!assistantDeltas.join("").includes("not json"), "invalid streamed JSON is not emitted as assistant text");
-}
-
-async function smokeDirectPlannerTransportError(): Promise<void> {
-  const result = await createGenerationPlan({
-    userText: "Create one image but the stream fails.",
-    defaults,
-    selectedReferences: [],
-    llmConfig: llmConfigFixture(),
-    now,
-    runner: createDirectChatPlanner(
-      failingStreamingModel(new Error("upstream failed for Bearer super.secret.token and sk-live-secret"))
-    )
-  });
-
-  expect(!result.ok, "stream transport error returns a failure");
-  expect(result.code === "agent_planner_failed", "stream transport error uses planner failed code");
-  expect(!result.message.includes("super.secret.token"), "stream transport error redacts bearer token");
-  expect(!result.message.includes("sk-live-secret"), "stream transport error redacts OpenAI-style key");
 }
 
 function smokeModelJobSizeCoercion(): void {
@@ -1596,6 +1754,19 @@ function expect(condition: unknown, message: string): asserts condition {
   }
 }
 
+function fileDataText(value: unknown): string {
+  if (!isRecord(value)) {
+    return "";
+  }
+
+  const content = value.content;
+  if (typeof content === "string") {
+    return content;
+  }
+
+  return Array.isArray(content) ? content.join("\n") : "";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1691,58 +1862,6 @@ function sequencedPlannerRunner(outputs: unknown[]): NonNullable<Parameters<type
       };
     }
   };
-}
-
-function capturingStreamingModel(chunks: unknown[]): Parameters<typeof createDirectChatPlanner>[0] & {
-  calls: unknown[];
-} {
-  const calls: unknown[] = [];
-  return {
-    calls,
-    async stream(input: unknown, options?: { signal?: AbortSignal }) {
-      calls.push(input);
-      return (async function* () {
-        for (const chunk of chunks) {
-          if (options?.signal?.aborted) {
-            return;
-          }
-          yield chunk;
-        }
-      })();
-    }
-  } as unknown as Parameters<typeof createDirectChatPlanner>[0] & { calls: unknown[] };
-}
-
-function firstSystemPrompt(input: unknown): string {
-  expect(Array.isArray(input), "direct planner model input is a message array");
-  const firstMessage = input[0];
-  expect(isRecord(firstMessage), "direct planner first message is an object");
-  return String(firstMessage.content ?? "");
-}
-
-function streamingModel(chunks: unknown[]): Parameters<typeof createDirectChatPlanner>[0] {
-  return {
-    async stream(_input: unknown, options?: { signal?: AbortSignal }) {
-      return (async function* () {
-        for (const chunk of chunks) {
-          if (options?.signal?.aborted) {
-            return;
-          }
-          yield chunk;
-        }
-      })();
-    }
-  } as unknown as Parameters<typeof createDirectChatPlanner>[0];
-}
-
-function failingStreamingModel(error: Error): Parameters<typeof createDirectChatPlanner>[0] {
-  return {
-    async stream() {
-      return (async function* () {
-        throw error;
-      })();
-    }
-  } as unknown as Parameters<typeof createDirectChatPlanner>[0];
 }
 
 main().catch((error: unknown) => {

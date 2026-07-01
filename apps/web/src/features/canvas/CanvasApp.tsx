@@ -133,7 +133,7 @@ import {
   type StylePresetId
 } from "@gpt-image-canvas/shared";
 import { LOCALES, localizedApiErrorMessage, useI18n, type Locale, type Translate } from "../../shared/i18n";
-import { assetDownloadUrl, assetPreviewUrl } from "../../shared/api/assets";
+import { assetDownloadUrl, assetInlineUrl, assetPreviewUrl } from "../../shared/api/assets";
 import {
   deletePromptFavorite,
   fetchPromptFavorites,
@@ -150,10 +150,13 @@ const AGENT_HISTORY_SAVE_DEBOUNCE_MS = 600;
 const AGENT_TRACE_ENTRY_LIMIT = 1000;
 const AGENT_TRACE_VISIBLE_LIMIT = 80;
 const AGENT_TRACE_MAX_STRING_LENGTH = 120_000;
-const AGENT_TRACE_DEBUG_ENABLED = import.meta.env.VITE_AGENT_TRACE_DEBUG === "true";
+const AGENT_TRACE_DEBUG_ENABLED = import.meta.env.VITE_AGENT_TRACE_DEBUG !== "false";
 const HISTORY_COLLAPSED_LIMIT = 3;
 const MAX_REFERENCE_IMAGE_BYTES = 50 * 1024 * 1024;
 const MOBILE_DRAWER_MEDIA_QUERY = "(max-width: 1023px)";
+const PROMPT_POOL_CANVAS_HANDOFF_QUERY_PARAM = "poolPromptHandoff";
+const PROMPT_POOL_CANVAS_HANDOFF_STORAGE_PREFIX = "gpt-image-canvas.prompt-pool-handoff.";
+const PROMPT_POOL_CANVAS_HANDOFF_TTL_MS = 5 * 60 * 1000;
 const ASSET_PREVIEW_WIDTHS = [256, 512, 1024, 2048] as const;
 type AssetPreviewWidth = (typeof ASSET_PREVIEW_WIDTHS)[number];
 const GENERATED_ASSET_INITIAL_PREVIEW_WIDTH: AssetPreviewWidth = 2048;
@@ -286,14 +289,39 @@ const defaultStorageConfigForm: StorageConfigFormState = {
 
 const canvasAssetStore: TLAssetStore = {
   async upload(_asset, file) {
+    const uploaded = await uploadCanvasAsset(file);
     return {
-      src: await blobToDataUrl(file)
+      src: uploaded.url
     };
   },
   resolve(asset, context) {
     return resolveCanvasAssetUrl(asset, context);
   }
 };
+
+async function uploadCanvasAsset(file: File): Promise<GeneratedAsset> {
+  const response = await fetch("/api/assets", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      dataUrl: await blobToDataUrl(file),
+      fileName: file.name
+    })
+  });
+
+  const body = (await response.json().catch(() => undefined)) as { asset?: GeneratedAsset; error?: { message?: string } } | undefined;
+  if (!response.ok || !body?.asset) {
+    throw new Error(body?.error?.message ?? "Asset upload failed.");
+  }
+
+  rememberAssetMetadata(body.asset.id, {
+    width: body.asset.width,
+    height: body.asset.height
+  });
+  return body.asset;
+}
 
 const promptStarters = [
   {
@@ -314,8 +342,58 @@ const promptStarters = [
   }
 ] as const;
 const DEFAULT_SIZE_PRESET_ID = "portrait-4k";
-const DEFAULT_SIZE_PRESET = SIZE_PRESETS.find((preset) => preset.id === DEFAULT_SIZE_PRESET_ID) ?? SIZE_PRESETS[0];
 const DEFAULT_IMAGE_QUALITY: ImageQuality = "high";
+const RESOLUTION_PRESETS = [
+  { id: "1k", label: "1K" },
+  { id: "2k", label: "2K" },
+  { id: "4k", label: "4K" }
+] as const;
+type ResolutionPresetId = (typeof RESOLUTION_PRESETS)[number]["id"];
+
+const ASPECT_RATIO_PRESETS = [
+  { id: "1-1", label: "1:1" },
+  { id: "16-9", label: "16:9" },
+  { id: "9-16", label: "9:16" },
+  { id: "4-3", label: "4:3" },
+  { id: "3-4", label: "3:4" },
+  { id: "3-2", label: "3:2" },
+  { id: "2-3", label: "2:3" }
+] as const;
+type AspectRatioPresetId = (typeof ASPECT_RATIO_PRESETS)[number]["id"];
+
+const SIZE_MATRIX: Record<ResolutionPresetId, Record<AspectRatioPresetId, { width: number; height: number; presetId: string }>> = {
+  "1k": {
+    "1-1": { width: 1024, height: 1024, presetId: "square-1k" },
+    "16-9": { width: 1824, height: 1024, presetId: "video-16-9" },
+    "9-16": { width: 1024, height: 1824, presetId: "story-9-16" },
+    "4-3": { width: 1360, height: 1024, presetId: "ratio-4-3-1k" },
+    "3-4": { width: 1024, height: 1360, presetId: "ratio-3-4-1k" },
+    "3-2": { width: 1536, height: 1024, presetId: "poster-landscape" },
+    "2-3": { width: 1024, height: 1536, presetId: "poster-portrait" }
+  },
+  "2k": {
+    "1-1": { width: 2048, height: 2048, presetId: "square-2k" },
+    "16-9": { width: 2048, height: 1152, presetId: "wide-2k" },
+    "9-16": { width: 1152, height: 2048, presetId: "portrait-2k" },
+    "4-3": { width: 2048, height: 1536, presetId: "ratio-4-3-2k" },
+    "3-4": { width: 1536, height: 2048, presetId: "ratio-3-4-2k" },
+    "3-2": { width: 2016, height: 1344, presetId: "ratio-3-2-2k" },
+    "2-3": { width: 1344, height: 2016, presetId: "ratio-2-3-2k" }
+  },
+  "4k": {
+    "1-1": { width: 2880, height: 2880, presetId: "square-4k" },
+    "16-9": { width: 3840, height: 2160, presetId: "wide-4k" },
+    "9-16": { width: 2160, height: 3840, presetId: "portrait-4k" },
+    "4-3": { width: 2880, height: 2160, presetId: "ratio-4-3-4k" },
+    "3-4": { width: 2160, height: 2880, presetId: "ratio-3-4-4k" },
+    "3-2": { width: 3264, height: 2176, presetId: "ratio-3-2-4k" },
+    "2-3": { width: 2176, height: 3264, presetId: "ratio-2-3-4k" }
+  }
+};
+const DEFAULT_RESOLUTION_PRESET_ID: ResolutionPresetId = "4k";
+const DEFAULT_ASPECT_RATIO_PRESET_ID: AspectRatioPresetId = "9-16";
+const DEFAULT_SIZE = SIZE_MATRIX[DEFAULT_RESOLUTION_PRESET_ID][DEFAULT_ASPECT_RATIO_PRESET_ID];
+const DEFAULT_SIZE_PRESET = SIZE_PRESETS.find((preset) => preset.id === DEFAULT_SIZE_PRESET_ID) ?? SIZE_PRESETS[0];
 const quickSizePresetIds = new Set([
   "square-1k",
   "poster-portrait",
@@ -362,6 +440,11 @@ type AppRoute = "home" | "canvas" | "pool" | "gallery";
 type SaveStatus = "loading" | "saved" | "pending" | "saving" | "error";
 type GenerationMode = "text" | "reference";
 type PanelTab = "manual" | "agent";
+type PromptPoolCanvasHandoffItem = Pick<PromptPoolItem, "aspectRatio" | "id" | "imageHeight" | "imageWidth" | "mediaType" | "prompt">;
+type PromptPoolCanvasHandoff = {
+  createdAt: number;
+  item: PromptPoolCanvasHandoffItem;
+};
 type PanelStatusTone = "progress" | "success" | "warning" | "error";
 type CodexLoginStatus = "idle" | "starting" | "pending" | "authorized" | "expired" | "denied" | "error";
 type AgentRunStatus = "idle" | "connecting" | "running";
@@ -570,6 +653,10 @@ interface ReferenceSelectionItem {
   sourceUrl: string;
   width: number;
   height: number;
+  canvasX: number;
+  canvasY: number;
+  canvasWidth: number;
+  canvasHeight: number;
 }
 
 type ReferenceSelection =
@@ -689,6 +776,99 @@ function pathForRoute(route: AppRoute): string {
   }
 
   return route === "gallery" ? "/gallery" : "/";
+}
+
+function promptPoolCanvasHandoffStorageKey(token: string): string {
+  return `${PROMPT_POOL_CANVAS_HANDOFF_STORAGE_PREFIX}${token}`;
+}
+
+function createPromptPoolCanvasHandoffToken(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isPromptPoolCanvasHandoff(value: unknown): value is PromptPoolCanvasHandoff {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const handoff = value as Partial<PromptPoolCanvasHandoff>;
+  const item = handoff.item as Partial<PromptPoolCanvasHandoffItem> | undefined;
+  return (
+    typeof handoff.createdAt === "number" &&
+    typeof item?.id === "string" &&
+    typeof item?.prompt === "string" &&
+    (item?.mediaType === "image" || item?.mediaType === "video")
+  );
+}
+
+function writePromptPoolCanvasHandoff(item: PromptPoolItem): string | null {
+  const token = createPromptPoolCanvasHandoffToken();
+  const handoff: PromptPoolCanvasHandoff = {
+    createdAt: Date.now(),
+    item: {
+      aspectRatio: item.aspectRatio,
+      id: item.id,
+      imageHeight: item.imageHeight,
+      imageWidth: item.imageWidth,
+      mediaType: item.mediaType,
+      prompt: item.prompt
+    }
+  };
+
+  try {
+    window.localStorage.setItem(promptPoolCanvasHandoffStorageKey(token), JSON.stringify(handoff));
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+function createPromptPoolCanvasHandoffUrl(item: PromptPoolItem): string | null {
+  const token = writePromptPoolCanvasHandoff(item);
+  if (!token) {
+    return null;
+  }
+
+  const url = new URL("/canvas", window.location.origin);
+  url.searchParams.set(PROMPT_POOL_CANVAS_HANDOFF_QUERY_PARAM, token);
+  return url.toString();
+}
+
+function clearPromptPoolCanvasHandoffUrl(url: URL): void {
+  url.searchParams.delete(PROMPT_POOL_CANVAS_HANDOFF_QUERY_PARAM);
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function consumePromptPoolCanvasHandoffFromLocation(): PromptPoolCanvasHandoffItem | null {
+  const url = new URL(window.location.href);
+  const token = url.searchParams.get(PROMPT_POOL_CANVAS_HANDOFF_QUERY_PARAM);
+  if (!token) {
+    return null;
+  }
+
+  clearPromptPoolCanvasHandoffUrl(url);
+
+  try {
+    const storageKey = promptPoolCanvasHandoffStorageKey(token);
+    const rawHandoff = window.localStorage.getItem(storageKey);
+    window.localStorage.removeItem(storageKey);
+    if (!rawHandoff) {
+      return null;
+    }
+
+    const handoff = JSON.parse(rawHandoff) as unknown;
+    if (!isPromptPoolCanvasHandoff(handoff) || Date.now() - handoff.createdAt > PROMPT_POOL_CANVAS_HANDOFF_TTL_MS) {
+      return null;
+    }
+
+    return handoff.item;
+  } catch {
+    return null;
+  }
 }
 
 function isPersistedSnapshot(value: unknown): value is PersistedSnapshot {
@@ -846,12 +1026,28 @@ function promptLikeSizePreset(item: {
   }, DEFAULT_SIZE_PRESET);
 }
 
-function promptPoolSizePreset(item: PromptPoolItem): SizePreset {
+function promptFavoriteSizePreset(item: PromptFavoriteItem): SizePreset {
   return promptLikeSizePreset(item);
 }
 
-function promptFavoriteSizePreset(item: PromptFavoriteItem): SizePreset {
-  return promptLikeSizePreset(item);
+function sizeSelectionForSize(
+  widthValue: number,
+  heightValue: number
+): { resolutionPresetId: ResolutionPresetId; aspectRatioPresetId: AspectRatioPresetId; sizePresetId: string } | undefined {
+  for (const resolution of RESOLUTION_PRESETS) {
+    for (const aspectRatio of ASPECT_RATIO_PRESETS) {
+      const size = SIZE_MATRIX[resolution.id][aspectRatio.id];
+      if (size.width === widthValue && size.height === heightValue) {
+        return {
+          resolutionPresetId: resolution.id,
+          aspectRatioPresetId: aspectRatio.id,
+          sizePresetId: size.presetId
+        };
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function firstDownloadableAsset(record: GenerationRecord): GeneratedAsset | undefined {
@@ -1052,6 +1248,44 @@ function createCenteredPlacements(editor: Editor, countValue: GenerationCount, s
   });
 }
 
+function createReferenceAdjacentPlacements(
+  references: ReferenceSelectionItem[],
+  countValue: GenerationCount,
+  size: ImageSize
+): GenerationPlaceholderPlacement[] {
+  if (references.length === 0) {
+    return [];
+  }
+
+  const placeholderSize = displaySize(size);
+  const columns = countValue >= 8 ? 4 : countValue === 1 ? 1 : 2;
+  const rows = Math.ceil(countValue / columns);
+  const gap = 48;
+  const cellWidth = placeholderSize.width;
+  const cellHeight = placeholderSize.height;
+  const gridHeight = rows * cellHeight + (rows - 1) * gap;
+  const referenceRight = Math.max(...references.map((reference) => reference.canvasX + reference.canvasWidth));
+  const referenceTop = Math.min(...references.map((reference) => reference.canvasY));
+  const referenceBottom = Math.max(...references.map((reference) => reference.canvasY + reference.canvasHeight));
+  const originX = referenceRight + gap;
+  const originY = (referenceTop + referenceBottom) / 2 - gridHeight / 2;
+
+  return Array.from({ length: countValue }, (_, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+
+    return {
+      id: createTldrawShapeId(),
+      x: originX + column * (cellWidth + gap),
+      y: originY + row * (cellHeight + gap),
+      width: placeholderSize.width,
+      height: placeholderSize.height,
+      targetWidth: size.width,
+      targetHeight: size.height
+    };
+  });
+}
+
 function createGenerationPlaceholdersFromPlacements(
   editor: Editor,
   placements: GenerationPlaceholderPlacement[],
@@ -1093,9 +1327,12 @@ function createGenerationPlaceholders(
   editor: Editor,
   input: GenerationSubmitInput,
   requestId: string,
-  options: { selectPlaceholders?: boolean } = {}
+  options: { references?: ReferenceSelectionItem[]; selectPlaceholders?: boolean } = {}
 ): ActiveGenerationPlaceholders {
-  return createGenerationPlaceholdersFromPlacements(editor, createCenteredPlacements(editor, input.count, input.size), requestId, options);
+  const placements = options.references?.length
+    ? createReferenceAdjacentPlacements(options.references, input.count, input.size)
+    : createCenteredPlacements(editor, input.count, input.size);
+  return createGenerationPlaceholdersFromPlacements(editor, placements, requestId, options);
 }
 
 function deleteAgentPlanNodes(editor: Editor): number {
@@ -1510,6 +1747,10 @@ function resolveReferenceSelection(editor: Editor, t: Translate): ReferenceSelec
       sourceUrl,
       width: asset?.type === "image" ? asset.props.w : imageShape.props.w,
       height: asset?.type === "image" ? asset.props.h : imageShape.props.h,
+      canvasX: bounds?.x ?? imageShape.x,
+      canvasY: bounds?.y ?? imageShape.y,
+      canvasWidth: bounds?.w ?? imageShape.props.w,
+      canvasHeight: bounds?.h ?? imageShape.props.h,
       sortX: bounds?.x ?? 0,
       sortY: bounds?.y ?? 0
     });
@@ -1561,7 +1802,7 @@ function resolveAgentReferenceSelection(editor: Editor, t: Translate): AgentRefe
 
   const references: ReferenceSelectionItem[] = [];
   let unreadableCount = 0;
-  for (const { imageShape } of selectedImages.slice(0, MAX_AGENT_SELECTED_REFERENCES)) {
+  for (const { imageShape, bounds } of selectedImages.slice(0, MAX_AGENT_SELECTED_REFERENCES)) {
     const asset = imageShape.props.assetId ? editor.getAsset(imageShape.props.assetId) : undefined;
     const sourceUrl = getImageSourceUrl(imageShape, asset);
     if (!sourceUrl || !isReadableReferenceSource(sourceUrl, asset)) {
@@ -1575,7 +1816,11 @@ function resolveAgentReferenceSelection(editor: Editor, t: Translate): AgentRefe
       name: getReferenceName(asset, sourceUrl),
       sourceUrl,
       width: asset?.type === "image" ? asset.props.w : imageShape.props.w,
-      height: asset?.type === "image" ? asset.props.h : imageShape.props.h
+      height: asset?.type === "image" ? asset.props.h : imageShape.props.h,
+      canvasX: bounds?.x ?? imageShape.x,
+      canvasY: bounds?.y ?? imageShape.y,
+      canvasWidth: bounds?.w ?? imageShape.props.w,
+      canvasHeight: bounds?.h ?? imageShape.props.h
     });
   }
 
@@ -1616,7 +1861,11 @@ function areReferenceSelectionsEqual(left: ReferenceSelection, right: ReferenceS
         leftReference.name === rightReference.name &&
         leftReference.sourceUrl === rightReference.sourceUrl &&
         leftReference.width === rightReference.width &&
-        leftReference.height === rightReference.height
+        leftReference.height === rightReference.height &&
+        leftReference.canvasX === rightReference.canvasX &&
+        leftReference.canvasY === rightReference.canvasY &&
+        leftReference.canvasWidth === rightReference.canvasWidth &&
+        leftReference.canvasHeight === rightReference.canvasHeight
       );
     })
   );
@@ -1638,7 +1887,11 @@ function areAgentReferenceSelectionsEqual(left: AgentReferenceSelection, right: 
         leftReference.name === rightReference.name &&
         leftReference.sourceUrl === rightReference.sourceUrl &&
         leftReference.width === rightReference.width &&
-        leftReference.height === rightReference.height
+        leftReference.height === rightReference.height &&
+        leftReference.canvasX === rightReference.canvasX &&
+        leftReference.canvasY === rightReference.canvasY &&
+        leftReference.canvasWidth === rightReference.canvasWidth &&
+        leftReference.canvasHeight === rightReference.canvasHeight
       );
     })
   );
@@ -1711,6 +1964,24 @@ function getLocalAssetId(asset: TLAsset | undefined, sourceUrl?: string): string
   return undefined;
 }
 
+function getCanvasImageAssetIds(editor: Editor): Set<string> {
+  const assetIds = new Set<string>();
+  for (const record of editor.store.allRecords()) {
+    if (!isRecord(record) || record.typeName !== "shape" || record.type !== "image") {
+      continue;
+    }
+
+    const imageShape = record as TLImageShape;
+    const asset = imageShape.props.assetId ? editor.getAsset(imageShape.props.assetId) : undefined;
+    const localAssetId = getLocalAssetId(asset, getImageSourceUrl(imageShape, asset));
+    if (localAssetId) {
+      assetIds.add(localAssetId);
+    }
+  }
+
+  return assetIds;
+}
+
 function resolveCanvasAssetUrl(asset: TLAsset, context: TLAssetContext): string | null {
   if (asset.type !== "image") {
     return "src" in asset.props && typeof asset.props.src === "string" ? asset.props.src : null;
@@ -1743,6 +2014,12 @@ interface CanvasResolutionBadgeTarget {
   localAssetId?: string;
   fallbackSize: ImageSize;
   badgeScale: number;
+  screenX: number;
+  screenY: number;
+}
+
+interface CanvasImageOpenTarget {
+  url: string;
   screenX: number;
   screenY: number;
 }
@@ -1810,6 +2087,40 @@ function CanvasResolutionBadgeOverlay() {
 function CanvasSnapIndicator({ className, ...props }: TLSnapIndicatorProps) {
   const snapIndicatorClassName = className ? `canvas-snap-indicator ${className}` : "canvas-snap-indicator";
   return <DefaultSnapIndicator {...props} className={snapIndicatorClassName} />;
+}
+
+function CanvasImageOpenOverlay() {
+  const editor = useEditor();
+  const { t } = useI18n();
+  const target = useValue("selected canvas image open target", () => getSelectedImageOpenTarget(editor), [editor]);
+
+  if (!target) {
+    return null;
+  }
+
+  return (
+    <button
+      aria-label={t("canvasOpenOriginalImage")}
+      className="canvas-image-open-button"
+      data-testid="canvas-image-open-button"
+      style={{
+        transform: `translate3d(${Math.round(target.screenX)}px, ${Math.round(target.screenY)}px, 0)`
+      }}
+      title={t("canvasOpenOriginalImage")}
+      type="button"
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        window.open(target.url, "_blank", "noopener,noreferrer");
+      }}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+    >
+      <ExternalLink className="size-4" aria-hidden="true" />
+    </button>
+  );
 }
 
 function usePointerClientPoint(editor: Editor): ClientPoint | undefined {
@@ -1883,6 +2194,40 @@ function getCanvasResolutionBadgeTarget(editor: Editor, pointerClientPoint: Clie
     badgeScale: resolutionBadgeScale(screenWidth, screenHeight, containerRect.width),
     screenX: topLeft.x - containerRect.left,
     screenY: topLeft.y - containerRect.top
+  };
+}
+
+function getSelectedImageOpenTarget(editor: Editor): CanvasImageOpenTarget | undefined {
+  const selectedShapes = editor.getSelectedShapes();
+  if (selectedShapes.length !== 1 || selectedShapes[0]?.type !== "image") {
+    return undefined;
+  }
+
+  const imageShape = selectedShapes[0] as TLImageShape;
+  const bounds = editor.getShapePageBounds(imageShape);
+  if (!bounds) {
+    return undefined;
+  }
+
+  const asset = imageShape.props.assetId ? editor.getAsset(imageShape.props.assetId) : undefined;
+  const sourceUrl = getImageSourceUrl(imageShape, asset);
+  const localAssetId = getLocalAssetId(asset, sourceUrl);
+  const url = localAssetId
+    ? assetInlineUrl(localAssetId)
+    : typeof imageShape.props.url === "string" && imageShape.props.url.trim()
+      ? imageShape.props.url
+      : sourceUrl;
+  if (!url) {
+    return undefined;
+  }
+
+  const topRight = editor.pageToScreen({ x: bounds.x + bounds.w, y: bounds.y });
+  const containerRect = editor.getContainer().getBoundingClientRect();
+
+  return {
+    url,
+    screenX: topRight.x - containerRect.left + 8,
+    screenY: topRight.y - containerRect.top - 8
   };
 }
 
@@ -3649,9 +3994,11 @@ export function App() {
   const [generationMode, setGenerationMode] = useState<GenerationMode>("text");
   const [prompt, setPrompt] = useState("");
   const [stylePreset, setStylePreset] = useState<StylePresetId>("none");
-  const [sizePresetId, setSizePresetId] = useState(DEFAULT_SIZE_PRESET.id);
-  const [width, setWidth] = useState(DEFAULT_SIZE_PRESET.width);
-  const [height, setHeight] = useState(DEFAULT_SIZE_PRESET.height);
+  const [resolutionPresetId, setResolutionPresetId] = useState<ResolutionPresetId>(DEFAULT_RESOLUTION_PRESET_ID);
+  const [aspectRatioPresetId, setAspectRatioPresetId] = useState<AspectRatioPresetId>(DEFAULT_ASPECT_RATIO_PRESET_ID);
+  const [sizePresetId, setSizePresetId] = useState(DEFAULT_SIZE.presetId);
+  const [width, setWidth] = useState(DEFAULT_SIZE.width);
+  const [height, setHeight] = useState(DEFAULT_SIZE.height);
   const [count, setCount] = useState<GenerationCount>(1);
   const [quality, setQuality] = useState<ImageQuality>(DEFAULT_IMAGE_QUALITY);
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("png");
@@ -3755,6 +4102,7 @@ export function App() {
   const saveTimerRef = useRef<number | undefined>();
   const codexPollTimerRef = useRef<number | undefined>();
   const favoriteCopyTimerRef = useRef<number | undefined>();
+  const canvasGalleryAssetIdsRef = useRef<Set<string>>(new Set());
   const saveRequestRef = useRef(0);
   const isGenerating = activeGenerationCount > 0;
   const hasGenerationProvider = authStatus?.provider === "openai" || authStatus?.provider === "codex";
@@ -3824,6 +4172,7 @@ export function App() {
           <>
             <CanvasThemeSync onChange={setIsCanvasDarkMode} />
             <CanvasResolutionBadgeOverlay />
+            <CanvasImageOpenOverlay />
           </>
         ),
         SnapIndicator: CanvasSnapIndicator,
@@ -3847,6 +4196,28 @@ export function App() {
     }
     setRoute(nextRoute);
   }, []);
+
+  const applyPromptPoolPromptToManualPanel = useCallback(
+    (item: PromptPoolCanvasHandoffItem): void => {
+      const nextPreset = promptLikeSizePreset(item);
+
+      setPrompt(item.prompt);
+      setStylePreset("none");
+      setSizePresetId(nextPreset.id);
+      setWidth(nextPreset.width);
+      setHeight(nextPreset.height);
+      setQuality(DEFAULT_IMAGE_QUALITY);
+      setOutputFormat("png");
+      setCount(1);
+      setGenerationMode("text");
+      setPanelTab("manual");
+      setGenerationError("");
+      setGenerationWarning("");
+      setGenerationMessage(t("generationPoolReused"));
+      setIsAiPanelOpen(true);
+    },
+    [t]
+  );
 
   const visibleHistory = useMemo(
     () => (isHistoryExpanded ? generationHistory : generationHistory.slice(0, HISTORY_COLLAPSED_LIMIT)),
@@ -4012,6 +4383,16 @@ export function App() {
       window.removeEventListener("popstate", updateRoute);
     };
   }, []);
+
+  useEffect(() => {
+    const handoffItem = consumePromptPoolCanvasHandoffFromLocation();
+    if (!handoffItem) {
+      return;
+    }
+
+    applyPromptPoolPromptToManualPanel(handoffItem);
+    navigateToRoute("canvas", { replace: true });
+  }, [applyPromptPoolPromptToManualPanel, navigateToRoute]);
 
   useEffect(() => {
     return () => {
@@ -4572,6 +4953,20 @@ export function App() {
         commitReferenceSelection();
       });
     };
+    const syncDeletedCanvasImagesToGallery = (): void => {
+      const previousAssetIds = canvasGalleryAssetIdsRef.current;
+      const currentAssetIds = getCanvasImageAssetIds(editor);
+      canvasGalleryAssetIdsRef.current = currentAssetIds;
+
+      const removedAssetIds = [...previousAssetIds].filter((assetId) => !currentAssetIds.has(assetId));
+      if (removedAssetIds.length > 0) {
+        void deleteGalleryRecordsForCanvasAssetIds(removedAssetIds);
+      }
+    };
+    const handleEditorChange = (): void => {
+      updateReferenceSelection();
+      syncDeletedCanvasImagesToGallery();
+    };
 
     const removeListener = editor.store.listen(
       () => {
@@ -4591,8 +4986,9 @@ export function App() {
       source: "all",
       scope: "all"
     });
-    editor.on("change", updateReferenceSelection);
+    editor.on("change", handleEditorChange);
     deleteAgentPlanNodes(editor);
+    canvasGalleryAssetIdsRef.current = getCanvasImageAssetIds(editor);
     commitReferenceSelection();
     recoverActiveGenerationPolling(editor);
 
@@ -4604,36 +5000,64 @@ export function App() {
       if (editorRef.current === editor) {
         editorRef.current = null;
       }
-      editor.off("change", updateReferenceSelection);
+      editor.off("change", handleEditorChange);
       removeReferenceStoreListener();
       removeListener();
     };
   }, [saveProjectSnapshot, t]);
 
-  function selectScenePreset(nextPresetId: string): void {
-    if (nextPresetId === CUSTOM_SIZE_PRESET_ID) {
+  function applySizeSelection(
+    nextResolutionPresetId: ResolutionPresetId,
+    nextAspectRatioPresetId: AspectRatioPresetId
+  ): void {
+    const nextSize = SIZE_MATRIX[nextResolutionPresetId][nextAspectRatioPresetId];
+    setResolutionPresetId(nextResolutionPresetId);
+    setAspectRatioPresetId(nextAspectRatioPresetId);
+    setSizePresetId(nextSize.presetId);
+    setWidth(nextSize.width);
+    setHeight(nextSize.height);
+  }
+
+  function selectResolutionPreset(nextPresetId: string): void {
+    const nextResolutionPreset = RESOLUTION_PRESETS.find((preset) => preset.id === nextPresetId);
+    if (!nextResolutionPreset) {
+      return;
+    }
+
+    applySizeSelection(nextResolutionPreset.id, aspectRatioPresetId);
+  }
+
+  function selectAspectRatioPreset(nextPresetId: string): void {
+    const nextAspectRatioPreset = ASPECT_RATIO_PRESETS.find((preset) => preset.id === nextPresetId);
+    if (!nextAspectRatioPreset) {
+      return;
+    }
+
+    applySizeSelection(resolutionPresetId, nextAspectRatioPreset.id);
+  }
+
+  function syncSizeSelection(widthValue: number, heightValue: number): void {
+    const selection = sizeSelectionForSize(widthValue, heightValue);
+    if (!selection) {
       setSizePresetId(CUSTOM_SIZE_PRESET_ID);
       return;
     }
 
-    const preset = SIZE_PRESETS.find((item) => item.id === nextPresetId);
-    if (!preset) {
-      return;
-    }
-
-    setSizePresetId(preset.id);
-    setWidth(preset.width);
-    setHeight(preset.height);
+    setResolutionPresetId(selection.resolutionPresetId);
+    setAspectRatioPresetId(selection.aspectRatioPresetId);
+    setSizePresetId(selection.sizePresetId);
   }
 
   function updateWidth(value: string): void {
-    setWidth(normalizeDimension(value));
-    setSizePresetId(CUSTOM_SIZE_PRESET_ID);
+    const nextWidth = normalizeDimension(value);
+    setWidth(nextWidth);
+    syncSizeSelection(nextWidth, height);
   }
 
   function updateHeight(value: string): void {
-    setHeight(normalizeDimension(value));
-    setSizePresetId(CUSTOM_SIZE_PRESET_ID);
+    const nextHeight = normalizeDimension(value);
+    setHeight(nextHeight);
+    syncSizeSelection(width, nextHeight);
   }
 
   function applyPromptStarter(starter: string): void {
@@ -4788,7 +5212,8 @@ export function App() {
     input: GenerationSubmitInput,
     requestMode: GenerationMode,
     resolveReference?: (signal: AbortSignal) => Promise<GenerationReferenceInput | undefined>,
-    referenceAssetIds?: string[]
+    referenceAssetIds?: string[],
+    references?: ReferenceSelectionItem[]
   ): Promise<void> {
     setGenerationError("");
     setGenerationMessage("");
@@ -4811,6 +5236,7 @@ export function App() {
     const controller = new AbortController();
     const generationId = crypto.randomUUID();
     const placeholderSet = createGenerationPlaceholders(editor, input, generationId, {
+      references: requestMode === "reference" ? references : undefined,
       selectPlaceholders: requestMode !== "reference"
     });
     const temporaryRecord = createTemporaryGenerationRecord({
@@ -4953,7 +5379,7 @@ export function App() {
         };
       }, referenceSelection.status === "ready"
         ? referenceAssetIdsForSelection(referenceSelection)
-        : undefined);
+        : undefined, referenceSelection.status === "ready" ? referenceSelection.references : undefined);
       return;
     }
 
@@ -5030,6 +5456,7 @@ export function App() {
     setSizePresetId(nextSizePresetId);
     setWidth(record.size.width);
     setHeight(record.size.height);
+    syncSizeSelection(record.size.width, record.size.height);
     setQuality(record.quality);
     setOutputFormat(record.outputFormat);
     setCount(nextCount);
@@ -5080,6 +5507,7 @@ export function App() {
     setSizePresetId(nextSizePresetId);
     setWidth(item.size.width);
     setHeight(item.size.height);
+    syncSizeSelection(item.size.width, item.size.height);
     setQuality(item.quality);
     setOutputFormat(item.outputFormat);
     setCount(1);
@@ -5111,6 +5539,37 @@ export function App() {
         ];
       })
     );
+  }
+
+  async function deleteGalleryRecordsForCanvasAssetIds(assetIds: string[]): Promise<void> {
+    if (assetIds.length === 0) {
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/gallery/assets", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ assetIds })
+      });
+
+      if (!response.ok) {
+        return;
+      }
+
+      const body = (await response.json()) as unknown;
+      if (!isRecord(body) || !Array.isArray(body.deletedOutputIds)) {
+        return;
+      }
+
+      body.deletedOutputIds
+        .filter((outputId): outputId is string => typeof outputId === "string")
+        .forEach(removeGalleryOutputFromHistory);
+    } catch {
+      // Canvas deletion should not be blocked if Gallery cleanup cannot be reached.
+    }
   }
 
   async function copyHistoryPrompt(record: GenerationRecord): Promise<void> {
@@ -5222,25 +5681,8 @@ export function App() {
     }
   }
 
-  function reusePromptPoolItem(item: PromptPoolItem): void {
-    const nextPreset = promptPoolSizePreset(item);
-
-    setPrompt(item.prompt);
-    setStylePreset("none");
-    setSizePresetId(nextPreset.id);
-    setWidth(nextPreset.width);
-    setHeight(nextPreset.height);
-    setQuality(DEFAULT_IMAGE_QUALITY);
-    setOutputFormat("png");
-    setCount(1);
-    setGenerationMode("text");
-    setGenerationError("");
-    setGenerationWarning("");
-    setGenerationMessage(t("generationPoolReused"));
-    navigateToRoute("canvas");
-    if (isMobileDrawer) {
-      setIsAiPanelOpen(true);
-    }
+  function reusePromptPoolItem(item: PromptPoolItem): string | null {
+    return createPromptPoolCanvasHandoffUrl(item);
   }
 
   async function loadPromptFavoriteState(signal?: AbortSignal): Promise<void> {
@@ -7006,49 +7448,50 @@ export function App() {
 
           <div>
             <span className="control-label">{t("generationSizeLabel")}</span>
-            <div className="quick-size-grid" data-testid="quick-size-presets">
-              {quickSizePresets.map((preset) => (
-                <button
-                  aria-pressed={sizePresetId === preset.id}
-                  className={sizePresetId === preset.id ? "quick-size-button is-active" : "quick-size-button"}
-                  key={preset.id}
-                  type="button"
-                  onClick={() => selectScenePreset(preset.id)}
+            <div className="size-selector-grid">
+              <label>
+                <span className="control-label control-label--subtle">{t("generationResolutionLabel")}</span>
+                <select
+                  className="field-control"
+                  id="resolution-preset"
+                  name="resolutionPreset"
+                  value={resolutionPresetId}
+                  data-testid="resolution-preset"
+                  onChange={(event) => selectResolutionPreset(event.target.value)}
                 >
-                  <span>{sizePresetLabel(preset, t)}</span>
-                  <small>
-                    {preset.width} x {preset.height}
-                  </small>
-                </button>
-              ))}
-              <button
-                aria-pressed={sizePresetId === CUSTOM_SIZE_PRESET_ID}
-                className={sizePresetId === CUSTOM_SIZE_PRESET_ID ? "quick-size-button is-active" : "quick-size-button"}
-                type="button"
-                onClick={() => selectScenePreset(CUSTOM_SIZE_PRESET_ID)}
-              >
-                <span>{t("customSize")}</span>
-                <small>{t("customSizeManual")}</small>
-              </button>
+                  {RESOLUTION_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span className="control-label control-label--subtle">{t("generationAspectRatioLabel")}</span>
+                <select
+                  className="field-control"
+                  id="aspect-ratio-preset"
+                  name="aspectRatioPreset"
+                  value={aspectRatioPresetId}
+                  data-testid="aspect-ratio-preset"
+                  onChange={(event) => selectAspectRatioPreset(event.target.value)}
+                >
+                  {ASPECT_RATIO_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
-            <label className="mt-3 block">
-              <span className="sr-only">{t("generationAllSizes")}</span>
-              <select
-                className="field-control"
-                id="scene-preset"
-                name="scenePreset"
-                value={sizePresetId}
-                data-testid="scene-preset"
-                onChange={(event) => selectScenePreset(event.target.value)}
-              >
-                {SIZE_PRESETS.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {sizePresetOptionLabel(preset, t)}
-                  </option>
-                ))}
-                <option value={CUSTOM_SIZE_PRESET_ID}>{t("customSizeOption")}</option>
-              </select>
-            </label>
+            <div className="size-summary" data-testid="computed-size">
+              {t("generationComputedSize", {
+                size:
+                  Number.isNaN(width) || Number.isNaN(height)
+                    ? t("customSize")
+                    : `${width} x ${height}`
+              })}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">

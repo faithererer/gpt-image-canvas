@@ -21,12 +21,23 @@ import { assets, generationOutputs, generationRecords, generationReferenceAssets
 
 export const DEFAULT_PROJECT_ID = "default";
 const DEFAULT_PROJECT_NAME = "Default Project";
-const PROJECT_SNAPSHOT_BACKUP_LIMIT = 50;
+const PROJECT_SNAPSHOT_BACKUP_COUNT_LIMIT = readPositiveIntegerEnv("PROJECT_SNAPSHOT_BACKUP_MAX_COUNT", 20);
+const PROJECT_SNAPSHOT_BACKUP_TOTAL_BYTES_LIMIT = readPositiveIntegerEnv(
+  "PROJECT_SNAPSHOT_BACKUP_MAX_BYTES",
+  256 * 1024 * 1024
+);
+const PROJECT_SNAPSHOT_BACKUP_MIN_COUNT = Math.min(
+  readPositiveIntegerEnv("PROJECT_SNAPSHOT_BACKUP_MIN_COUNT", 3),
+  PROJECT_SNAPSHOT_BACKUP_COUNT_LIMIT
+);
+const PROJECT_SNAPSHOT_BACKUP_MIN_INTERVAL_MS = readPositiveIntegerEnv(
+  "PROJECT_SNAPSHOT_BACKUP_MIN_INTERVAL_MS",
+  5 * 60 * 1000
+);
 const LARGE_PROJECT_SNAPSHOT_BYTES = 1024 * 1024;
 const EMPTY_PROJECT_OVERWRITE_BYTES = 16 * 1024;
 const EMPTY_PROJECT_STORE_RECORDS = 2;
 const fallbackWarnings = new Set<string>();
-const backedUpSnapshotHashes = new Set<string>();
 
 interface ProjectSnapshotInput {
   name?: string;
@@ -55,6 +66,10 @@ export class ProjectSnapshotOverwriteRejectedError extends Error {
   readonly code = "project_snapshot_overwrite_rejected";
 }
 
+interface EnsureDefaultProjectOptions {
+  backupExisting: boolean;
+}
+
 interface SnapshotStats {
   bytes: number;
   storeRecords: number;
@@ -63,8 +78,20 @@ interface SnapshotStats {
   meaningful: boolean;
 }
 
+interface ProjectSnapshotBackupFile {
+  filePath: string;
+  fileName: string;
+  mtimeMs: number;
+  size: number;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function parseSnapshot(snapshotJson: string): unknown | null {
@@ -76,10 +103,16 @@ function parseSnapshot(snapshotJson: string): unknown | null {
 }
 
 export function ensureDefaultProject(): void {
+  ensureDefaultProjectRow({ backupExisting: true });
+}
+
+function ensureDefaultProjectRow(options: EnsureDefaultProjectOptions): void {
   const existing = getDefaultProjectRow();
 
   if (existing) {
-    tryWriteProjectSnapshotBackup(existing.snapshotJson, existing.updatedAt);
+    if (options.backupExisting) {
+      tryWriteProjectSnapshotBackup(existing.snapshotJson, existing.updatedAt);
+    }
     return;
   }
   if (defaultProjectRowExists()) {
@@ -99,7 +132,7 @@ export function ensureDefaultProject(): void {
 }
 
 export function saveProjectSnapshot(input: ProjectSnapshotInput): ProjectState {
-  ensureDefaultProject();
+  ensureDefaultProjectRow({ backupExisting: false });
 
   const updatedAt = nowIso();
   const current = getDefaultProjectRow();
@@ -184,6 +217,37 @@ export function getGalleryImages(): GalleryResponse {
 export function deleteGalleryOutput(outputId: string): boolean {
   const result = db.delete(generationOutputs).where(eq(generationOutputs.id, outputId)).run();
   return result.changes > 0;
+}
+
+export function deleteGalleryOutputs(outputIds: string[]): string[] {
+  if (outputIds.length === 0) {
+    return [];
+  }
+
+  const deletedOutputIds: string[] = [];
+  for (const outputId of outputIds) {
+    if (deleteGalleryOutput(outputId)) {
+      deletedOutputIds.push(outputId);
+    }
+  }
+
+  return deletedOutputIds;
+}
+
+export function deleteGalleryOutputsByAssetIds(assetIds: string[]): string[] {
+  if (assetIds.length === 0) {
+    return [];
+  }
+
+  const rows = db
+    .select({
+      outputId: generationOutputs.id
+    })
+    .from(generationOutputs)
+    .where(and(inArray(generationOutputs.assetId, assetIds), eq(generationOutputs.status, "succeeded")))
+    .all();
+
+  return deleteGalleryOutputs(rows.map((row) => row.outputId));
 }
 
 export function getGalleryExportAssets(outputIds: string[]): GalleryExportAsset[] {
@@ -306,7 +370,13 @@ function tryWriteProjectSnapshotBackup(snapshotJson: string, updatedAt: string):
   try {
     writeProjectSnapshotBackup(snapshotJson, updatedAt);
   } catch (error) {
-    warnOnce("project-snapshot-backup-failed", `Project snapshot backup failed. ${formatErrorSummary(error)}`);
+    warnOnce("project-snapshot-backup-write-failed", `Project snapshot backup write failed. ${formatErrorSummary(error)}`);
+  }
+
+  try {
+    pruneProjectSnapshotBackups();
+  } catch (error) {
+    warnOnce("project-snapshot-backup-prune-failed", `Project snapshot backup prune failed. ${formatErrorSummary(error)}`);
   }
 }
 
@@ -317,8 +387,10 @@ function writeProjectSnapshotBackup(snapshotJson: string, updatedAt: string): vo
   }
 
   const hash = createHash("sha256").update(snapshotJson).digest("hex");
-  if (backedUpSnapshotHashes.has(hash) || backupExists(hash)) {
-    backedUpSnapshotHashes.add(hash);
+  if (backupExists(hash)) {
+    return;
+  }
+  if (shouldDelayProjectSnapshotBackup()) {
     return;
   }
 
@@ -331,8 +403,6 @@ function writeProjectSnapshotBackup(snapshotJson: string, updatedAt: string): vo
 
   writeFileSync(tempPath, gzipSync(snapshotJson));
   renameSync(tempPath, finalPath);
-  backedUpSnapshotHashes.add(hash);
-  pruneProjectSnapshotBackups();
 }
 
 function backupExists(hash: string): boolean {
@@ -342,21 +412,63 @@ function backupExists(hash: string): boolean {
   );
 }
 
-function pruneProjectSnapshotBackups(): void {
-  const backups = readdirSync(runtimePaths.projectSnapshotBackupsDir)
-    .filter((fileName) => fileName.endsWith(".json.gz"))
-    .map((fileName) => {
-      const filePath = join(runtimePaths.projectSnapshotBackupsDir, fileName);
-      return {
-        filePath,
-        mtimeMs: statSync(filePath).mtimeMs
-      };
-    })
-    .sort((left, right) => right.mtimeMs - left.mtimeMs);
+function shouldDelayProjectSnapshotBackup(): boolean {
+  const latestBackup = readProjectSnapshotBackups()[0];
+  if (!latestBackup) {
+    return false;
+  }
 
-  for (const backup of backups.slice(PROJECT_SNAPSHOT_BACKUP_LIMIT)) {
+  return Date.now() - latestBackup.mtimeMs < PROJECT_SNAPSHOT_BACKUP_MIN_INTERVAL_MS;
+}
+
+function pruneProjectSnapshotBackups(): void {
+  const backups = readProjectSnapshotBackups();
+  let keptCount = 0;
+  let keptBytes = 0;
+
+  for (const backup of backups) {
+    const keepForRecoveryFloor = keptCount < PROJECT_SNAPSHOT_BACKUP_MIN_COUNT;
+    const keepWithinCountLimit = keptCount < PROJECT_SNAPSHOT_BACKUP_COUNT_LIMIT;
+    const keepWithinBytesLimit = keptBytes + backup.size <= PROJECT_SNAPSHOT_BACKUP_TOTAL_BYTES_LIMIT;
+
+    if (keepForRecoveryFloor || (keepWithinCountLimit && keepWithinBytesLimit)) {
+      keptCount += 1;
+      keptBytes += backup.size;
+      continue;
+    }
+
     rmSync(backup.filePath, { force: true });
   }
+}
+
+function readProjectSnapshotBackups(): ProjectSnapshotBackupFile[] {
+  return readdirSync(runtimePaths.projectSnapshotBackupsDir)
+    .flatMap((fileName): ProjectSnapshotBackupFile[] => {
+      if (!fileName.endsWith(".json.gz")) {
+        return [];
+      }
+
+      const filePath = join(runtimePaths.projectSnapshotBackupsDir, fileName);
+      let stats: ReturnType<typeof statSync>;
+      try {
+        stats = statSync(filePath);
+      } catch {
+        return [];
+      }
+      if (!stats.isFile()) {
+        return [];
+      }
+
+      return [
+        {
+          filePath,
+          fileName,
+          mtimeMs: stats.mtimeMs,
+          size: stats.size
+        }
+      ];
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs || right.fileName.localeCompare(left.fileName));
 }
 
 function safeTimestamp(value: string): string {

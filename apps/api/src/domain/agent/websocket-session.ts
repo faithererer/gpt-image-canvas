@@ -21,8 +21,17 @@ import {
   isExecutableGenerationPlan,
   type StoredAgentGenerationPlan
 } from "./executor.js";
-import { createGenerationPlan, type AgentPlannerConversationContext } from "./planner.js";
-import { resolvePlanningSkillLoadoutForRequest } from "./skill-store.js";
+import {
+  DEEPAGENT_DEEPSEEK_THINKING_MODE,
+  DEEPAGENT_PLANNING_CHECKPOINTER,
+  DEEPAGENT_PLANNING_HITL_TOOLS,
+  DEEPAGENT_PLANNING_MEMORY_SOURCES,
+  DEEPAGENT_PLANNING_SKILL_SOURCES,
+  DEEPAGENT_PLANNING_SUBAGENTS,
+  createGenerationPlan,
+  type AgentPlannerConversationContext
+} from "./planner.js";
+import { resolveAvailablePlanningSkillLoadout } from "./skill-store.js";
 import { getStoredAssetFile, saveReferenceImageInput } from "../generation/image-generation.js";
 
 const OPEN_READY_STATE = 1;
@@ -496,7 +505,7 @@ async function handleAgentPlanMessage(
     resolvedConversationReferences,
     resolvedConversationReferences ? "previous_agent_outputs" : clientSelectedReferences.length > 0 ? "manual_selection" : undefined
   );
-  const planningSkillLoadout = resolvePlanningSkillLoadoutForRequest(message.text);
+  const planningSkillLoadout = resolveAvailablePlanningSkillLoadout();
   const plannerToolCallId = `tool-call-${randomUUID()}`;
   const plannerStartedAt = Date.now();
   sendAgentToolCallEvent(session, {
@@ -520,7 +529,16 @@ async function handleAgentPlanMessage(
         : undefined,
       model: llmConfig.model,
       supportsVision: llmConfig.supportsVision,
-      skills: planningSkillLoadout.skills.map((skill) => skill.slug)
+      skillSelectionMode: "deepagent_progressive_disclosure",
+      skills: planningSkillLoadout.skills.map((skill) => skill.slug),
+      deepAgent: {
+        skillSources: [...DEEPAGENT_PLANNING_SKILL_SOURCES],
+        memorySources: [...DEEPAGENT_PLANNING_MEMORY_SOURCES],
+        subagents: [...DEEPAGENT_PLANNING_SUBAGENTS],
+        hitlTools: [...DEEPAGENT_PLANNING_HITL_TOOLS],
+        checkpointer: DEEPAGENT_PLANNING_CHECKPOINTER,
+        deepSeekThinkingMode: DEEPAGENT_DEEPSEEK_THINKING_MODE
+      }
     }
   });
 

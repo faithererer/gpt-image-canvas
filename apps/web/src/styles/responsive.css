@@ -172,7 +172,8 @@
     align-self: center;
   }
 
-  .quick-size-grid {
+  .quick-size-grid,
+  .size-selector-grid {
     grid-template-columns: 1fr;
   }
 

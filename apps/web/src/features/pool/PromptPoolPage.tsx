@@ -19,7 +19,7 @@ import {
   WandSparkles,
   X
 } from "lucide-react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, MouseEvent } from "react";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type {
   PromptFavoriteGroup,
@@ -40,7 +40,7 @@ import {
 } from "../prompt-favorites/promptFavoritesApi";
 
 interface PromptPoolPageProps {
-  onUsePrompt: (item: PromptPoolItem) => void;
+  onUsePrompt: (item: PromptPoolItem) => string | null;
 }
 
 type PromptPoolMediaFilter = "all" | PromptPoolMediaType;
@@ -562,7 +562,7 @@ function PromptPoolCard({
   onCopy: () => void;
   onFavorite: () => void;
   onOpen: () => void;
-  onUse: () => void;
+  onUse: () => string | null;
 }) {
   const { t } = useI18n();
   const excerpt = promptExcerpt(item.prompt);
@@ -643,10 +643,16 @@ function PromptPoolCard({
                 <CheckCircle2 className="pool-icon-action__icon pool-icon-action__icon--check size-4" />
               </span>
             </button>
-            <button className="pool-use-action" type="button" onClick={onUse}>
+            <a
+              className="pool-use-action"
+              href="/canvas"
+              rel="noopener noreferrer"
+              target="_blank"
+              onClick={(event) => applyPromptPoolLinkHandoff(event, onUse)}
+            >
               <WandSparkles className="size-4" aria-hidden="true" />
               {t("poolUseToCanvas")}
-            </button>
+            </a>
           </div>
         </footer>
       </div>
@@ -673,7 +679,7 @@ function PromptPoolDetailDialog({
   onClose: () => void;
   onCopy: () => void;
   onFavorite: () => void;
-  onUse: () => void;
+  onUse: () => string | null;
 }) {
   const { t } = useI18n();
 
@@ -751,10 +757,16 @@ function PromptPoolDetailDialog({
             {copied ? <CheckCircle2 className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
             {t("commonCopy")}
           </button>
-          <button className="primary-action h-10" type="button" onClick={onUse}>
+          <a
+            className="primary-action h-10"
+            href="/canvas"
+            rel="noopener noreferrer"
+            target="_blank"
+            onClick={(event) => applyPromptPoolLinkHandoff(event, onUse)}
+          >
             <WandSparkles className="size-4" aria-hidden="true" />
             {t("poolUseToCanvas")}
-          </button>
+          </a>
           {item.sourceUrl ? (
             <a className="secondary-action h-10" href={item.sourceUrl} rel="noreferrer" target="_blank">
               <ExternalLink className="size-4" aria-hidden="true" />
@@ -765,6 +777,13 @@ function PromptPoolDetailDialog({
       </div>
     </div>
   );
+}
+
+function applyPromptPoolLinkHandoff(event: MouseEvent<HTMLAnchorElement>, onUse: () => string | null): void {
+  const handoffUrl = onUse();
+  if (handoffUrl) {
+    event.currentTarget.href = handoffUrl;
+  }
 }
 
 function PromptFavoritePopover({
@@ -917,7 +936,7 @@ function filterPromptPoolItems(
 
 function usePromptPoolColumnCount(): number {
   const [columnCount, setColumnCount] = useState(() =>
-    typeof window === "undefined" ? 4 : promptPoolColumnCountForWidth(window.innerWidth)
+    typeof window === "undefined" ? 6 : promptPoolColumnCountForWidth(window.innerWidth)
   );
 
   useEffect(() => {
@@ -948,7 +967,7 @@ function promptPoolColumnCountForWidth(width: number): number {
     return 3;
   }
 
-  return 4;
+  return 6;
 }
 
 function distributePromptPoolItems(items: PromptPoolItem[], columnCount: number): PromptPoolColumnItem[][] {

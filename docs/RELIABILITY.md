@@ -22,7 +22,7 @@ Important persistence rules:
 - If changing snapshot format, preserve old project restore behavior or document migration behavior.
 - Do not run local `pnpm dev` and Docker against the same `data/` directory at the same time.
 - The API runs `PRAGMA quick_check` at startup and should fail fast if SQLite reports corruption. Do not bypass this and keep using the same database; stop the app and restore from backup first.
-- Project snapshots are backed up outside SQLite under `data/project-snapshot-backups/` as rotated `.json.gz` files. Treat them as private runtime data and use the newest valid snapshot if the `projects` row becomes unreadable.
+- Project snapshots are backed up outside SQLite under `data/project-snapshot-backups/` as rotated `.json.gz` files. Treat them as private runtime data and use the newest valid snapshot if the `projects` row becomes unreadable. The backup directory is bounded by count, compressed byte size, and a minimum write interval; tune `PROJECT_SNAPSHOT_BACKUP_MAX_COUNT`, `PROJECT_SNAPSHOT_BACKUP_MAX_BYTES`, `PROJECT_SNAPSHOT_BACKUP_MIN_COUNT`, and `PROJECT_SNAPSHOT_BACKUP_MIN_INTERVAL_MS` only when local recovery needs justify the disk cost.
 - Project saves should not replace a large, non-empty saved canvas with an empty snapshot. A rejected empty overwrite usually means the client loaded a fallback/failed project state and should be reloaded after the database issue is fixed.
 
 ## Provider Reliability

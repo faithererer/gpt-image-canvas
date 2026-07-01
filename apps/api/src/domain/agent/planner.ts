@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { MemorySaver } from "@langchain/langgraph";
 import { ChatOpenAI } from "@langchain/openai";
-import { createDeepAgent } from "deepagents";
+import { createDeepAgent, type AnySubAgent, type FileData } from "deepagents";
 import type { UsableAgentLlmConfig } from "./config.js";
 import {
-  createBuiltInPlanningSkillLoadoutForRequest,
-  createEmbeddedPlanningSkillsPrompt,
+  createBuiltInPlanningSkillLibraryLoadout,
   createPlanningSkillFiles,
   createPlanningSystemPrompt,
   type PlanningSkillLoadout
@@ -48,13 +48,27 @@ const DEFAULT_PLAN_COUNT = 1;
 const MAX_PLANNER_REFLECTION_ATTEMPTS = 1;
 const PLANNER_REFLECTION_OUTPUT_PREVIEW_LIMIT = 6000;
 const PLANNER_REFLECTION_ISSUE_LIMIT = 8;
-const FALLBACK_VARIANT_DIRECTIONS = [
+const DIRECT_EDIT_FALLBACK_VARIANT_DIRECTIONS = [
   "bold chrome typography and high-contrast editorial flash",
   "pastel magazine collage with softer UI stickers and glossy accents",
   "grunge Y2K layout with silver holographic elements and dense type",
   "cyber UI grid composition with neon sticker details",
   "polished luxury campaign layout with rainbow holographic highlights"
 ] as const;
+const CREATIVE_REFERENCE_FALLBACK_VARIANT_DIRECTIONS = [
+  "a fresh pose, wardrobe, and setting matched to the requested style",
+  "a different camera angle, lighting mood, and color palette",
+  "a new scene composition with styling details that avoid copying the original layout",
+  "a more expressive action and background while keeping the referenced subject recognizable",
+  "a distinct art-direction treatment that follows the user's requested theme"
+] as const;
+export const DEEPAGENT_PLANNING_SKILL_SOURCES = ["/skills/"] as const;
+export const DEEPAGENT_PLANNING_MEMORY_PATH = "/memories/gpt-image-canvas/AGENTS.md" as const;
+export const DEEPAGENT_PLANNING_MEMORY_SOURCES = [DEEPAGENT_PLANNING_MEMORY_PATH] as const;
+export const DEEPAGENT_PLANNING_HITL_TOOLS = ["execute"] as const;
+export const DEEPAGENT_PLANNING_CHECKPOINTER = "MemorySaver" as const;
+export const DEEPAGENT_DEEPSEEK_THINKING_MODE = "enabled_with_reasoning_content_roundtrip" as const;
+export const DEEPAGENT_PLANNING_SUBAGENTS = ["general-purpose"] as const;
 
 const GENERATION_JOB_ROLES: readonly GenerationJobRole[] = [
   "final_image",
@@ -173,7 +187,6 @@ interface PlannerMessage {
 }
 
 export interface GenerationPlanAgentRunner {
-  streamsThinkingDeltas?: boolean;
   invoke(
     input: {
       messages: PlannerMessage[];
@@ -185,7 +198,6 @@ export interface GenerationPlanAgentRunner {
       };
       recursionLimit?: number;
       signal?: AbortSignal;
-      onThinkingDelta?: (delta: string) => void;
     }
   ): Promise<unknown>;
 }
@@ -261,6 +273,14 @@ type PlannerAttemptEvaluation =
       shouldReflect: boolean;
       previousOutput: string;
     };
+type SelectedReferencePromptMode = "direct_edit" | "creative_reference";
+type SelectedReferenceIntent = {
+  requiresSelectedImageEdit: boolean;
+  requiresEverySelectedReference: boolean;
+  allowsCombinedReferences: boolean;
+  requiresSingleCombinedOutput: boolean;
+  promptMode: SelectedReferencePromptMode;
+};
 
 export interface GenerationPlanValidationContext {
   defaults: GenerationPlanDefaults;
@@ -296,7 +316,7 @@ export async function createGenerationPlan(input: AgentPlannerInput): Promise<Ag
   }
 
   const plannerOptions = normalizeAgentPlannerOptions(input.plannerOptions);
-  const planningSkillLoadout = input.skillLoadout ?? createBuiltInPlanningSkillLoadoutForRequest(userText);
+  const planningSkillLoadout = input.skillLoadout ?? createBuiltInPlanningSkillLibraryLoadout();
   const runner = input.runner ?? createDeepAgentsPlanner(input.llmConfig, plannerOptions, planningSkillLoadout);
   const now = input.now ?? new Date();
   const planId = `plan-${randomUUID()}`;
@@ -308,7 +328,13 @@ export async function createGenerationPlan(input: AgentPlannerInput): Promise<Ag
     conversationContext: input.conversationContext
   });
 
-  const planningSkillFiles = createPlanningSkillFiles(now, planningSkillLoadout);
+  const planningFiles = {
+    ...createPlanningSkillFiles(now, planningSkillLoadout),
+    ...createPlanningMemoryFiles(now, {
+      userText,
+      conversationContext: input.conversationContext
+    })
+  };
   const invokePlannerAttempt = async (
     messages: PlannerMessage[],
     attemptIndex: number
@@ -326,15 +352,12 @@ export async function createGenerationPlan(input: AgentPlannerInput): Promise<Ag
       recursionLimit: 30,
       signal: input.signal
     };
-    if (runner.streamsThinkingDeltas) {
-      runnerOptions.onThinkingDelta = input.onThinkingDelta;
-    }
 
     try {
       const agentResult = await runner.invoke(
         {
           messages,
-          files: planningSkillFiles
+          files: planningFiles
         },
         runnerOptions
       );
@@ -342,7 +365,7 @@ export async function createGenerationPlan(input: AgentPlannerInput): Promise<Ag
         return agentRunCancelledResult();
       }
 
-      const reasoningText = runner.streamsThinkingDeltas ? undefined : extractReasoningFromAgentResult(agentResult);
+      const reasoningText = extractReasoningFromAgentResult(agentResult);
       if (reasoningText) {
         emitAssistantDelta(input.onThinkingDelta, [reasoningText]);
       }
@@ -472,7 +495,12 @@ function evaluatePlannerAttemptOutput(input: {
     };
   }
 
-  const selectedReferenceEditIssue = validateSelectedReferenceEditPlan(validated.plan, {
+  const normalizedPlan = normalizeSelectedReferenceUsagesForIntent(validated.plan, {
+    userText: input.userText,
+    selectedReferences: input.selectedReferences
+  });
+
+  const selectedReferenceEditIssue = validateSelectedReferenceEditPlan(normalizedPlan, {
     userText: input.userText,
     selectedReferences: input.selectedReferences
   });
@@ -491,7 +519,7 @@ function evaluatePlannerAttemptOutput(input: {
         };
   }
 
-  const requestedOutputCountIssue = validateRequestedOutputCount(validated.plan, input.userText);
+  const requestedOutputCountIssue = validateRequestedOutputCount(normalizedPlan, input.userText);
   if (requestedOutputCountIssue) {
     const usableFallbackPlan = fallbackPlan && planSatisfiesRequestedOutputCount(fallbackPlan, input.userText);
     return usableFallbackPlan
@@ -509,7 +537,7 @@ function evaluatePlannerAttemptOutput(input: {
 
   return {
     ok: true,
-    plan: validated.plan
+    plan: normalizedPlan
   };
 }
 
@@ -551,16 +579,56 @@ export function createDeepAgentsPlanner(
   const isDeepSeek = isDeepSeekAgentConfig(config);
   const model = createAgentChatModel(config, isDeepSeek, plannerOptions);
 
-  if (isDeepSeek) {
-    return createDirectChatPlanner(model, skillLoadout);
-  }
-
   return createDeepAgent({
     model,
-    skills: ["/skills/"],
+    skills: [...DEEPAGENT_PLANNING_SKILL_SOURCES],
+    memory: [...DEEPAGENT_PLANNING_MEMORY_SOURCES],
+    checkpointer: new MemorySaver(),
+    interruptOn: Object.fromEntries(DEEPAGENT_PLANNING_HITL_TOOLS.map((toolName) => [toolName, true])),
+    subagents: [] as AnySubAgent[],
     systemPrompt: createPlanningSystemPrompt(skillLoadout),
     tools: []
   }) as unknown as GenerationPlanAgentRunner;
+}
+
+export function createPlanningMemoryFiles(
+  now = new Date(),
+  input?: {
+    userText?: string;
+    conversationContext?: AgentPlannerConversationContext;
+  }
+): Record<string, FileData> {
+  const timestamp = now.toISOString();
+  const memory = createPlanningMemoryContent(input);
+  return {
+    [DEEPAGENT_PLANNING_MEMORY_PATH]: {
+      content: memory.split("\n"),
+      created_at: timestamp,
+      modified_at: timestamp
+    }
+  };
+}
+
+function createPlanningMemoryContent(input?: {
+  userText?: string;
+  conversationContext?: AgentPlannerConversationContext;
+}): string {
+  const contextSummary = formatConversationContextSummary(input?.conversationContext);
+  const clarificationSummary = input?.userText
+    ? formatClarificationFollowUpSummary(input.userText, input.conversationContext)
+    : "";
+
+  return [
+    "# gpt-image-canvas Agent Memory",
+    "",
+    "This file is request-scoped memory seeded by the host application for DeepAgents native memory/context middleware.",
+    "Use it as context for planning, not as a place to reveal internal storage details to the user.",
+    "",
+    contextSummary || "No previous Agent conversation context is available for this request.",
+    clarificationSummary ? `\n${clarificationSummary}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function createAgentChatModel(
@@ -569,7 +637,7 @@ function createAgentChatModel(
   plannerOptions?: AgentPlannerOptions
 ): ChatOpenAI {
   const modelKwargs = agentModelKwargsForConfig(config, plannerOptions);
-  return new ChatOpenAI({
+  const model = new ChatOpenAI({
     apiKey: config.apiKey,
     configuration: config.baseUrl ? { baseURL: config.baseUrl } : undefined,
     maxRetries: 1,
@@ -580,87 +648,10 @@ function createAgentChatModel(
     temperature: isDeepSeek ? undefined : 0,
     timeout: config.timeoutMs
   });
-}
-
-export function createDirectChatPlanner(
-  model: ChatOpenAI,
-  skillLoadout?: PlanningSkillLoadout
-): GenerationPlanAgentRunner {
-  return {
-    streamsThinkingDeltas: true,
-    async invoke(input, options) {
-      const stream = await model.stream(
-        [
-          {
-            role: "system",
-            content: createDirectPlanningSystemPrompt(skillLoadout)
-          },
-          ...input.messages
-        ] as never,
-        {
-          signal: options?.signal
-        } as never
-      );
-      const contentChunks: string[] = [];
-      const reasoningSeen = new Set<string>();
-
-      for await (const chunk of stream as AsyncIterable<unknown>) {
-        throwIfAborted(options?.signal);
-        for (const reasoningDelta of extractReasoningDeltasFromStreamChunk(chunk, reasoningSeen)) {
-          options?.onThinkingDelta?.(reasoningDelta);
-        }
-        throwIfAborted(options?.signal);
-
-        const content = extractContentDeltaFromStreamChunk(chunk);
-        if (content !== undefined) {
-          contentChunks.push(content);
-        }
-        throwIfAborted(options?.signal);
-      }
-
-      throwIfAborted(options?.signal);
-
-      return {
-        messages: [
-          {
-            content: contentChunks.join("")
-          }
-        ]
-      };
-    }
-  };
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) {
-    throw new Error("Agent planning was cancelled.");
+  if (isDeepSeek) {
+    attachDeepSeekReasoningContentRoundTrip(model);
   }
-}
-
-function extractContentDeltaFromStreamChunk(chunk: unknown): string | undefined {
-  if (typeof chunk === "string") {
-    return chunk.length > 0 ? chunk : undefined;
-  }
-
-  if (!isRecord(chunk)) {
-    return undefined;
-  }
-
-  return streamingContentToText(chunk.content) ?? streamingContentToText(chunk.text);
-}
-
-function extractReasoningDeltasFromStreamChunk(chunk: unknown, seen: Set<string>): string[] {
-  const deltas: string[] = [];
-  collectStreamingReasoningText(chunk, deltas, seen);
-  return deltas;
-}
-
-function createDirectPlanningSystemPrompt(skillLoadout?: PlanningSkillLoadout): string {
-  return [
-    createPlanningSystemPrompt(skillLoadout),
-    "The full built-in planning skills are embedded below for this single chat completion request.",
-    createEmbeddedPlanningSkillsPrompt(skillLoadout)
-  ].join("\n\n");
+  return model;
 }
 
 export function agentModelKwargsForConfig(
@@ -674,22 +665,211 @@ export function agentModelKwargsForConfig(
   const thinkingType = plannerOptions?.thinking?.type ?? "enabled";
   if (thinkingType === "disabled") {
     return {
-      extra_body: {
-        thinking: {
-          type: "disabled"
-        }
+      thinking: {
+        type: "disabled"
       }
     };
   }
 
   return {
-    extra_body: {
-      thinking: {
-        type: "enabled"
-      }
+    thinking: {
+      type: "enabled"
     },
     reasoning_effort: plannerOptions?.reasoningEffort ?? "high"
   };
+}
+
+type DeepSeekChatCompletionRequest = {
+  messages?: unknown;
+  [key: string]: unknown;
+};
+
+type DeepSeekRequestMessage = {
+  role?: unknown;
+  reasoning_content?: unknown;
+  tool_calls?: unknown;
+  [key: string]: unknown;
+};
+
+type DeepSeekCompletionsAdapter = {
+  __deepSeekReasoningContentRoundTripPatched?: boolean;
+  _generate?: (...args: unknown[]) => Promise<unknown>;
+  _streamResponseChunks?: (...args: unknown[]) => AsyncGenerator<unknown>;
+  completionWithRetry?: (...args: unknown[]) => Promise<unknown>;
+};
+
+type DeepSeekChatOpenAIAdapter = ChatOpenAI & {
+  __deepSeekReasoningContentRoundTripPatched?: boolean;
+  completions?: DeepSeekCompletionsAdapter;
+  withConfig?: (...args: unknown[]) => unknown;
+};
+
+function attachDeepSeekReasoningContentRoundTrip(model: ChatOpenAI): void {
+  const adapter = model as DeepSeekChatOpenAIAdapter;
+  const mutableAdapter = adapter as unknown as {
+    __deepSeekReasoningContentRoundTripPatched?: boolean;
+    withConfig?: (...args: unknown[]) => unknown;
+    completions?: DeepSeekCompletionsAdapter;
+  };
+  if (!adapter.__deepSeekReasoningContentRoundTripPatched) {
+    mutableAdapter.__deepSeekReasoningContentRoundTripPatched = true;
+    const originalWithConfig = mutableAdapter.withConfig?.bind(adapter);
+    if (originalWithConfig) {
+      mutableAdapter.withConfig = (...args: unknown[]) => {
+        const configuredModel = originalWithConfig(...args);
+        if (configuredModel && typeof configuredModel === "object") {
+          attachDeepSeekReasoningContentRoundTrip(configuredModel as ChatOpenAI);
+        }
+        return configuredModel;
+      };
+    }
+  }
+
+  const completions = mutableAdapter.completions;
+  if (
+    !completions?.completionWithRetry ||
+    !completions._generate ||
+    !completions._streamResponseChunks ||
+    completions.__deepSeekReasoningContentRoundTripPatched
+  ) {
+    return;
+  }
+  completions.__deepSeekReasoningContentRoundTripPatched = true;
+
+  const originalGenerate = completions._generate.bind(completions);
+  const originalStream = completions._streamResponseChunks.bind(completions);
+  const originalCompletionWithRetry = completions.completionWithRetry.bind(completions);
+  let activeMessages: unknown[] | undefined;
+  const reasoningContentByToolCallId = new Map<string, string>();
+
+  completions._generate = async (...args: unknown[]) => {
+    const previousMessages = activeMessages;
+    activeMessages = Array.isArray(args[0]) ? args[0] : undefined;
+    try {
+      return await originalGenerate(...args);
+    } finally {
+      activeMessages = previousMessages;
+    }
+  };
+
+  completions._streamResponseChunks = async function* (...args: unknown[]) {
+    const previousMessages = activeMessages;
+    activeMessages = Array.isArray(args[0]) ? args[0] : undefined;
+    try {
+      yield* originalStream(...args);
+    } finally {
+      activeMessages = previousMessages;
+    }
+  };
+
+  completions.completionWithRetry = async (...args: unknown[]) => {
+    const [request, requestOptions] = args;
+    return originalCompletionWithRetry(
+      patchDeepSeekReasoningContentForRequest(
+        request as DeepSeekChatCompletionRequest,
+        activeMessages,
+        reasoningContentByToolCallId
+      ),
+      requestOptions
+    );
+  };
+}
+
+export function patchDeepSeekReasoningContentForRequest(
+  request: DeepSeekChatCompletionRequest,
+  langChainMessages: unknown[] | undefined,
+  reasoningContentByToolCallId?: Map<string, string>
+): DeepSeekChatCompletionRequest {
+  if (!Array.isArray(request.messages) || !Array.isArray(langChainMessages)) {
+    return request;
+  }
+
+  return {
+    ...request,
+    messages: request.messages.map((message, index) => {
+      if (!isRecord(message) || message.role !== "assistant") {
+        return message;
+      }
+
+      const reasoningContent =
+        deepSeekReasoningContentForRequestMessage(message) ??
+        deepSeekReasoningContentForLangChainMessage(langChainMessages[index]) ??
+        deepSeekReasoningContentFromToolCallMemory(message, reasoningContentByToolCallId);
+      if (reasoningContent === undefined && !hasOpenAIToolCalls(message)) {
+        return message;
+      }
+
+      const patchedMessage = {
+        ...message,
+        reasoning_content: reasoningContent ?? ""
+      } satisfies DeepSeekRequestMessage;
+      rememberDeepSeekReasoningContentForToolCalls(patchedMessage, reasoningContentByToolCallId);
+      return patchedMessage;
+    })
+  };
+}
+
+function deepSeekReasoningContentForRequestMessage(message: DeepSeekRequestMessage): string | undefined {
+  return reasoningContentToText(message.reasoning_content);
+}
+
+function deepSeekReasoningContentForLangChainMessage(message: unknown): string | undefined {
+  if (!isRecord(message)) {
+    return undefined;
+  }
+
+  const additionalKwargs = isRecord(message.additional_kwargs) ? message.additional_kwargs : undefined;
+  const responseMetadata = isRecord(message.response_metadata) ? message.response_metadata : undefined;
+  return (
+    reasoningContentToText(additionalKwargs?.reasoning_content) ??
+    reasoningContentToText(additionalKwargs?.reasoning) ??
+    reasoningContentToText(responseMetadata?.reasoning_content) ??
+    reasoningContentToText(responseMetadata?.reasoning)
+  );
+}
+
+function hasOpenAIToolCalls(message: DeepSeekRequestMessage): boolean {
+  return Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+}
+
+function deepSeekReasoningContentFromToolCallMemory(
+  message: DeepSeekRequestMessage,
+  reasoningContentByToolCallId: Map<string, string> | undefined
+): string | undefined {
+  if (!reasoningContentByToolCallId || !Array.isArray(message.tool_calls)) {
+    return undefined;
+  }
+
+  for (const toolCall of message.tool_calls) {
+    const toolCallId = isRecord(toolCall) && typeof toolCall.id === "string" ? toolCall.id : undefined;
+    const reasoningContent = toolCallId ? reasoningContentByToolCallId.get(toolCallId) : undefined;
+    if (reasoningContent) {
+      return reasoningContent;
+    }
+  }
+
+  return undefined;
+}
+
+function rememberDeepSeekReasoningContentForToolCalls(
+  message: DeepSeekRequestMessage,
+  reasoningContentByToolCallId: Map<string, string> | undefined
+): void {
+  if (!reasoningContentByToolCallId || !Array.isArray(message.tool_calls)) {
+    return;
+  }
+
+  const reasoningContent = reasoningContentToText(message.reasoning_content);
+  if (!reasoningContent) {
+    return;
+  }
+
+  for (const toolCall of message.tool_calls) {
+    const toolCallId = isRecord(toolCall) && typeof toolCall.id === "string" ? toolCall.id : undefined;
+    if (toolCallId) {
+      reasoningContentByToolCallId.set(toolCallId, reasoningContent);
+    }
+  }
 }
 
 function normalizeAgentPlannerOptions(input: unknown): AgentPlannerOptions | undefined {
@@ -853,6 +1033,7 @@ export function buildPlannerUserMessage(input: {
     formatReferenceSummary(reference, index, input.supportsVision)
   );
   const requestedOutputCount = requestedOutputCountFromUserText(input.userText);
+  const selectedReferenceIntent = selectedReferenceEditIntent(input.userText, input.selectedReferences.length);
   const contextSummary = formatConversationContextSummary(input.conversationContext);
   const clarificationSummary = formatClarificationFollowUpSummary(input.userText, input.conversationContext);
   const text = [
@@ -871,10 +1052,10 @@ export function buildPlannerUserMessage(input: {
     requestedOutputCount
       ? `Detected explicit requested final output count: ${requestedOutputCount}. The plan must produce at least ${requestedOutputCount} final output image(s), unless that would exceed the 16-image cap or conflict with a safety/user-input gate. Do not collapse a request for ${requestedOutputCount} variants/prompts/images into a single selected-image edit job with count 1.`
       : "",
-    referenceSummaries.length > 0 && hasSelectedReferenceEditIntent(input.userText, input.selectedReferences.length)
-      ? "Selected-image edit mode: the user is asking to work on the selected/original image(s). Preserve those images as the source. Create edit jobs with selected_canvas_image references; for each/every selected image, create one final_image job per ref with count 1 and exactly one selected_canvas_image reference. If the user explicitly requests multiple variants/prompts/output images, preserve that output count. Prompts must say to edit the original directly and must forbid blank poster templates, generic geometric backgrounds, or unrelated replacement images."
+    referenceSummaries.length > 0 && selectedReferenceIntent.requiresSelectedImageEdit
+      ? selectedReferencePlannerGuidance(selectedReferenceIntent)
       : "",
-    referenceSummaries.length === 0 && hasSelectedReferenceEditIntent(input.userText, 0)
+    referenceSummaries.length === 0 && selectedReferenceIntent.requiresSelectedImageEdit
       ? 'The request appears to depend on original/selected canvas images, but none are selected. Return an AgentUserQuestion with code "missing_selected_canvas_reference".'
       : "",
     input.supportsVision
@@ -911,6 +1092,26 @@ export function buildPlannerUserMessage(input: {
       ...imageBlocks
     ]
   };
+}
+
+function selectedReferencePlannerGuidance(intent: SelectedReferenceIntent): string {
+  const jobStructureGuidance =
+    "Create jobs with selected_canvas_image references; for each/every selected image, create one final_image job per ref with count 1 and exactly one selected_canvas_image reference. If the user explicitly requests multiple variants/prompts/output images, preserve that output count.";
+  if (intent.promptMode === "creative_reference") {
+    return [
+      "Selected-image creative reference mode: the user is asking to use the selected/original image(s) as references for new image(s), variants, or style changes rather than a literal retouch.",
+      jobStructureGuidance,
+      'For child, person, portrait, photoshoot, avatar, or identity-reference work, each selected_canvas_image reference must use usage "subject" unless the user explicitly needs a reusable character; do not use usage "other" for identity references.',
+      'Prompts must say to use the selected image as a subject/identity/style reference and create a new image. Do not use wording such as "Edit the original image", "preserve the pose", "preserve the composition", or "preserve the original scene" unless the user explicitly asks for exact preservation.',
+      "Allow pose, action, clothing, background, lighting, composition, and scene to change when the user allows it or the requested style needs it. Do not replace the referenced subject with an unrelated subject."
+    ].join(" ");
+  }
+
+  return [
+    "Selected-image direct edit mode: the user is asking to work on the selected/original image(s). Preserve those images as the source.",
+    jobStructureGuidance,
+    "Prompts must say to edit the original directly and must forbid blank poster templates, generic geometric backgrounds, or unrelated replacement images."
+  ].join(" ");
 }
 
 function buildPlannerReflectionUserMessage(input: {
@@ -1012,6 +1213,7 @@ function createSelectedReferenceEditFallbackPlan(input: {
   const timestamp = input.now.toISOString();
   const references = input.selectedReferences.slice(0, MAX_AGENT_SELECTED_REFERENCES);
   const requestedOutputCount = requestedOutputCountFromUserText(input.userText);
+  const referenceUsage: GenerationReferenceUsage = intent.promptMode === "creative_reference" ? "subject" : "scene";
   if (intent.allowsCombinedReferences && intent.requiresSingleCombinedOutput && references.length > MAX_REFERENCE_IMAGES) {
     return undefined;
   }
@@ -1028,10 +1230,13 @@ function createSelectedReferenceEditFallbackPlan(input: {
         role: "final_image",
         prompt: selectedReferenceFallbackPrompt(
           input.userText,
-          `Edit selected canvas image ref${index + 1} directly and create ${requestedOutputCount} distinct variants`
+          intent.promptMode === "creative_reference"
+            ? `Use selected canvas image ref${index + 1} as the subject reference and create ${requestedOutputCount} distinct new images`
+            : `Edit selected canvas image ref${index + 1} directly and create ${requestedOutputCount} distinct variants`,
+          intent.promptMode
         ),
         count: requestedOutputCount,
-        references: [selectedReferenceForFallbackJob(reference)],
+        references: [selectedReferenceForFallbackJob(reference, referenceUsage)],
         status: "queued",
         outputs: [],
         visible: true
@@ -1040,9 +1245,14 @@ function createSelectedReferenceEditFallbackPlan(input: {
       jobs = Array.from({ length: requestedOutputCount }, (_, index) => ({
         id: `edit_selected_variant_${index + 1}`,
         role: "final_image",
-        prompt: selectedReferenceVariantFallbackPrompt(input.userText, index + 1, requestedOutputCount),
+        prompt: selectedReferenceVariantFallbackPrompt(
+          input.userText,
+          index + 1,
+          requestedOutputCount,
+          intent.promptMode
+        ),
         count: 1,
-        references: references.map((reference) => selectedReferenceForFallbackJob(reference)),
+        references: references.map((reference) => selectedReferenceForFallbackJob(reference, referenceUsage)),
         status: "queued",
         outputs: [],
         visible: true
@@ -1055,9 +1265,15 @@ function createSelectedReferenceEditFallbackPlan(input: {
         {
           id: "edit_selected_combined",
           role: "final_image",
-          prompt: selectedReferenceFallbackPrompt(input.userText, "Edit the selected canvas images together"),
+          prompt: selectedReferenceFallbackPrompt(
+            input.userText,
+            intent.promptMode === "creative_reference"
+              ? "Use the selected canvas images together as references for a new image"
+              : "Edit the selected canvas images together",
+            intent.promptMode
+          ),
           count: 1,
-          references: references.map((reference) => selectedReferenceForFallbackJob(reference)),
+          references: references.map((reference) => selectedReferenceForFallbackJob(reference, referenceUsage)),
           status: "queued",
           outputs: [],
           visible: true
@@ -1068,10 +1284,13 @@ function createSelectedReferenceEditFallbackPlan(input: {
         role: "final_image",
         prompt: selectedReferenceFallbackPrompt(
           input.userText,
-          `Edit selected canvas image ref${index + 1} directly`
+          intent.promptMode === "creative_reference"
+            ? `Use selected canvas image ref${index + 1} as the subject reference for a new image`
+            : `Edit selected canvas image ref${index + 1} directly`,
+          intent.promptMode
         ),
         count: 1,
-        references: [selectedReferenceForFallbackJob(reference)],
+        references: [selectedReferenceForFallbackJob(reference, referenceUsage)],
         status: "queued",
         outputs: [],
         visible: true
@@ -1116,16 +1335,34 @@ function validateSelectedReferenceEditRequest(
   };
 }
 
-function selectedReferenceForFallbackJob(reference: AgentSelectedCanvasReference): GenerationReference {
+function selectedReferenceForFallbackJob(
+  reference: AgentSelectedCanvasReference,
+  usage: GenerationReferenceUsage = "scene"
+): GenerationReference {
   return {
     kind: "selected_canvas_image",
-    usage: "scene",
+    usage,
     assetId: reference.assetId,
     label: reference.label
   };
 }
 
-function selectedReferenceFallbackPrompt(userText: string, action: string): string {
+function selectedReferenceFallbackPrompt(
+  userText: string,
+  action: string,
+  promptMode: SelectedReferencePromptMode = "direct_edit"
+): string {
+  if (promptMode === "creative_reference") {
+    return [
+      `${action} according to the user request: ${userText}`,
+      "Create a new image from the reference instead of directly editing the original photo.",
+      "Keep the referenced subject recognizable and preserve only user-requested identity or subject traits.",
+      "Pose, action, clothing, background, lighting, composition, and scene may change to fit the requested style.",
+      "Do not copy the original pose, original photo layout, or original scene unless the user explicitly asks for exact preservation.",
+      "Do not replace the referenced subject with an unrelated subject."
+    ].join(" ");
+  }
+
   return [
     `${action} according to the user request: ${userText}`,
     "Preserve the original image content, composition, perspective, and main subjects.",
@@ -1134,8 +1371,28 @@ function selectedReferenceFallbackPrompt(userText: string, action: string): stri
   ].join(" ");
 }
 
-function selectedReferenceVariantFallbackPrompt(userText: string, index: number, total: number): string {
-  const direction = FALLBACK_VARIANT_DIRECTIONS[(index - 1) % FALLBACK_VARIANT_DIRECTIONS.length];
+function selectedReferenceVariantFallbackPrompt(
+  userText: string,
+  index: number,
+  total: number,
+  promptMode: SelectedReferencePromptMode = "direct_edit"
+): string {
+  if (promptMode === "creative_reference") {
+    const direction =
+      CREATIVE_REFERENCE_FALLBACK_VARIANT_DIRECTIONS[
+        (index - 1) % CREATIVE_REFERENCE_FALLBACK_VARIANT_DIRECTIONS.length
+      ];
+    return [
+      `Use the selected canvas image(s) as reference for new image variant ${index} of ${total}: ${userText}`,
+      `Distinct variant direction: ${direction}.`,
+      "Create a new image rather than editing the original photo directly.",
+      "Keep the referenced subject recognizable and preserve only user-requested identity or subject traits.",
+      "Pose, action, clothing, background, lighting, composition, and scene may change to fit the requested style.",
+      "Do not copy the original pose, original photo layout, or original scene unless explicitly requested."
+    ].join(" ");
+  }
+
+  const direction = DIRECT_EDIT_FALLBACK_VARIANT_DIRECTIONS[(index - 1) % DIRECT_EDIT_FALLBACK_VARIANT_DIRECTIONS.length];
   return [
     `Edit the selected canvas image(s) directly as requested variant ${index} of ${total}: ${userText}`,
     `Distinct variant direction: ${direction}.`,
@@ -1174,6 +1431,19 @@ function validateSelectedReferenceEditPlan(
     };
   }
 
+  if (intent.promptMode === "creative_reference") {
+    const directEditJob = plan.jobs.find(
+      (job) => job.role === "final_image" && jobHasSelectedReference(job) && creativeReferencePromptUsesDirectEditLanguage(job.prompt)
+    );
+    if (directEditJob) {
+      return {
+        ok: false,
+        code: "agent_requires_user_input",
+        message: `Job "${directEditJob.id}" uses direct-edit wording for a creative reference request. Use the selected image as a reference for a new image, and do not require preserving pose, composition, or the original scene unless the user asks for that.`
+      };
+    }
+  }
+
   if (!intent.requiresEverySelectedReference || intent.allowsCombinedReferences) {
     return undefined;
   }
@@ -1192,6 +1462,110 @@ function validateSelectedReferenceEditPlan(
       .map((reference, index) => reference.label ?? reference.assetId ?? `ref${index + 1}`)
       .join(", ")}.`
   };
+}
+
+function normalizeSelectedReferenceUsagesForIntent(
+  plan: GenerationPlan,
+  input: {
+    userText: string;
+    selectedReferences: AgentSelectedCanvasReference[];
+  }
+): GenerationPlan {
+  const intent = selectedReferenceEditIntent(input.userText, input.selectedReferences.length);
+  if (!intent.requiresSelectedImageEdit || input.selectedReferences.length === 0) {
+    return plan;
+  }
+
+  let changed = false;
+  const jobs = plan.jobs.map((job) => {
+    let jobChanged = false;
+    const targetUsage = selectedReferenceUsageForIntent(intent, `${input.userText}\n${job.prompt}`);
+    const references = job.references.map((reference) => {
+      if (reference.kind !== "selected_canvas_image") {
+        return reference;
+      }
+
+      const usage = normalizedSelectedReferenceUsage(reference.usage, targetUsage, intent.promptMode);
+      if (usage === reference.usage) {
+        return reference;
+      }
+
+      changed = true;
+      jobChanged = true;
+      return {
+        ...reference,
+        usage
+      };
+    });
+
+    return !jobChanged
+      ? job
+      : {
+          ...job,
+          references
+        };
+  });
+
+  return changed
+    ? {
+        ...plan,
+        jobs
+      }
+    : plan;
+}
+
+function selectedReferenceUsageForIntent(
+  intent: SelectedReferenceIntent,
+  text: string
+): GenerationReferenceUsage {
+  if (intent.promptMode === "direct_edit") {
+    return "scene";
+  }
+
+  if (hasProductReferenceLanguage(text)) {
+    return "product";
+  }
+
+  if (hasStyleReferenceLanguage(text) && !hasPortraitOrCharacterReferenceLanguage(text)) {
+    return "style";
+  }
+
+  return "subject";
+}
+
+function normalizedSelectedReferenceUsage(
+  usage: GenerationReferenceUsage,
+  targetUsage: GenerationReferenceUsage,
+  promptMode: SelectedReferencePromptMode
+): GenerationReferenceUsage {
+  if (promptMode === "direct_edit") {
+    return usage === "other" ? "scene" : usage;
+  }
+
+  if (usage === "other") {
+    return targetUsage;
+  }
+
+  if (targetUsage === "subject" && (usage === "scene" || usage === "composition")) {
+    return "subject";
+  }
+
+  return usage;
+}
+
+function jobHasSelectedReference(job: GenerationJob): boolean {
+  return job.references.some((reference) => reference.kind === "selected_canvas_image");
+}
+
+function creativeReferencePromptUsesDirectEditLanguage(prompt: string): boolean {
+  const text = normalizeIntentText(prompt);
+  return (
+    /edit (?:the )?(?:original|selected|source|canvas)?\s*(?:image|photo|picture)/u.test(text) ||
+    /(?:directly edit|edit .* directly|only enrich|only add|whimsical .* overlay)/u.test(text) ||
+    /preserv(?:e|ing).{0,80}(?:pose|posture|composition|perspective|layout|scene|photo content|original photo)/u.test(text) ||
+    /(?:strictly|must) preserv(?:e|ing).{0,80}(?:original|pose|posture|composition|scene|layout)/u.test(text) ||
+    /do not replace (?:the )?(?:child|subject|person|product|photo|image).{0,80}only/u.test(text)
+  );
 }
 
 function selectedReferenceAssetIdsForFinalJobs(plan: GenerationPlan): Set<string> {
@@ -1354,17 +1728,11 @@ function parseEnglishCountToken(token: string): number | undefined {
   return counts[token.toLowerCase()];
 }
 
-function selectedReferenceEditIntent(
-  userText: string,
-  selectedReferenceCount: number
-): {
-  requiresSelectedImageEdit: boolean;
-  requiresEverySelectedReference: boolean;
-  allowsCombinedReferences: boolean;
-  requiresSingleCombinedOutput: boolean;
-} {
+function selectedReferenceEditIntent(userText: string, selectedReferenceCount: number): SelectedReferenceIntent {
   const text = normalizeIntentText(userText);
-  const hasSelectedContext = selectedReferenceCount > 0 || hasExplicitExistingImageTarget(text);
+  const hasSelectedContext =
+    selectedReferenceCount > 0 || hasExplicitExistingImageTarget(text) || hasReferenceImageLanguage(text);
+  const hasCreativeReferenceAction = hasCreativeSelectedReferenceIntent(text);
   const hasEditAction =
     /编辑|修改|调整|改成|改为|优化|润色|重绘|修图|保留|基于|基础上|加字|加上字|加文字|配字|配上字|配文字|配上文字|配文|文案|标题|字幕|字标|字体|排版|贴字|一致|统一|edit|modify|retouch|polish|redesign|based on|from the original|add text|text overlay|caption|title|typography|copy|font|consistent|unify/u.test(text);
   const requiresEverySelectedReference =
@@ -1375,15 +1743,68 @@ function selectedReferenceEditIntent(
     /合成一张|拼成一张|做成一张|一张图|一张海报|one image|single image|one poster|single poster/u.test(text);
 
   return {
-    requiresSelectedImageEdit: hasSelectedContext && (hasEditAction || allowsCombinedReferences),
+    requiresSelectedImageEdit: hasSelectedContext && (hasEditAction || allowsCombinedReferences || hasCreativeReferenceAction),
     requiresEverySelectedReference,
     allowsCombinedReferences,
-    requiresSingleCombinedOutput
+    requiresSingleCombinedOutput,
+    promptMode: hasCreativeReferenceAction ? "creative_reference" : "direct_edit"
   };
 }
 
 function hasExplicitExistingImageTarget(text: string): boolean {
   return /原图|原始图|原始图片|原本|选中|所选|当前图|当前图片|这张图|这张图片|这些图|这些图片|刚刚生成|刚才生成|上一轮|上次生成|之前生成|selected image|selected images|selected original|selected originals|original image|original images|source image|source images|current image|current images|this image|these images|previous output|previous outputs|latest output|latest outputs|generated output|generated outputs/u.test(
+    text
+  );
+}
+
+function hasCreativeSelectedReferenceIntent(text: string): boolean {
+  const hasCreativeOutput =
+    /generate|create|make|render|produce|new image|new images|portrait|photo shoot|photoshoot|variations?|variants?|different images?|\u751f\u6210|\u521b\u4f5c|\u521b\u5efa|\u505a\u6210|\u51fa\u56fe|\u5199\u771f|\u4eba\u50cf|\u8096\u50cf|\u5934\u50cf|\u4e0d\u540c/u.test(
+      text
+    );
+  if (!hasCreativeOutput || hasDirectTextOrOverlayIntent(text)) {
+    return false;
+  }
+
+  return (
+    hasReferenceImageLanguage(text) ||
+    hasLooseReferenceTransformationLanguage(text) ||
+    hasPortraitOrCharacterReferenceLanguage(text)
+  );
+}
+
+function hasDirectTextOrOverlayIntent(text: string): boolean {
+  return /add text|text overlay|caption|title|typography|copy|font|headline|subtitle|\u52a0\u5b57|\u52a0\u6587\u5b57|\u914d\u5b57|\u914d\u6587|\u6807\u9898|\u5b57\u5e55|\u5b57\u4f53|\u6587\u6848|\u6392\u7248|\u8d34\u5b57/u.test(
+    text
+  );
+}
+
+function hasReferenceImageLanguage(text: string): boolean {
+  return /based on|uploaded image|uploaded photo|reference image|source image|selected image|selected photo|original image|original photo|from (?:the )?(?:uploaded|selected|source|original|reference).{0,16}(?:image|photo|picture)|use (?:the )?.{0,24}as (?:a )?reference|\u57fa\u4e8e.{0,16}(?:\u56fe|\u7167|\u4e0a\u4f20|\u539f|\u9009\u4e2d)|\u53c2\u8003.{0,16}(?:\u56fe|\u7167|\u4e0a\u4f20|\u539f|\u9009\u4e2d)|\u4e0a\u4f20\u56fe|\u4e0a\u4f20\u7167/u.test(
+    text
+  );
+}
+
+function hasLooseReferenceTransformationLanguage(text: string): boolean {
+  return /not constrained|do not be constrained|not bound|not limited|free to change|can change|may change|pose|posture|action|clothing|outfit|wardrobe|background|scene|composition|\u4e0d\u62d8\u6ce5|\u4e0d\u9650|\u4e0d\u8981\u4fdd\u7559|\u65e0\u9700\u4fdd\u7559|\u53ef\u4ee5.{0,12}(?:\u4e0d\u540c|\u6539|\u6362)|\u52a8\u4f5c|\u59ff\u52bf|\u670d\u9970|\u670d\u88c5|\u8863\u670d|\u80cc\u666f|\u573a\u666f|\u6784\u56fe/u.test(
+    text
+  );
+}
+
+function hasPortraitOrCharacterReferenceLanguage(text: string): boolean {
+  return /portrait|photo shoot|photoshoot|headshot|avatar|character|children's artistic|\u5199\u771f|\u827a\u672f\u7167|\u4eba\u50cf|\u8096\u50cf|\u5934\u50cf|\u513f\u7ae5|\u5c0f\u5b69|\u5b69\u5b50/u.test(
+    text
+  );
+}
+
+function hasProductReferenceLanguage(text: string): boolean {
+  return /product|sku|packshot|merchandise|goods|item|listing|marketplace|\u4ea7\u54c1|\u5546\u54c1|\u8d27\u54c1|\u5355\u54c1|\u4e3b\u56fe|\u8be6\u60c5/u.test(
+    text
+  );
+}
+
+function hasStyleReferenceLanguage(text: string): boolean {
+  return /style|aesthetic|look and feel|moodboard|palette|visual direction|\u98ce\u683c|\u7f8e\u5b66|\u89c6\u89c9|\u8272\u5f69|\u914d\u8272/u.test(
     text
   );
 }
@@ -1457,7 +1878,7 @@ export function validateGenerationPlan(
     jobs,
     edges,
     createdBy: "agent",
-    createdAt: isoStringValue(input.createdAt) ?? now,
+    createdAt: now,
     updatedAt: now
   };
 
@@ -1527,22 +1948,6 @@ function collectReasoningText(value: unknown, chunks: string[], seen: Set<string
   }
 }
 
-function collectStreamingReasoningText(value: unknown, chunks: string[], seen: Set<string>): void {
-  if (!isRecord(value)) {
-    return;
-  }
-
-  for (const candidate of reasoningCandidates(value)) {
-    const text = reasoningContentToStreamingText(candidate);
-    if (text === undefined || text.trim().length === 0 || seen.has(text)) {
-      continue;
-    }
-
-    seen.add(text);
-    chunks.push(text);
-  }
-}
-
 function reasoningCandidates(value: Record<string, unknown>): unknown[] {
   return [
     value.reasoning_content,
@@ -1578,32 +1983,6 @@ function reasoningContentToText(value: unknown): string | undefined {
   }
 
   return Array.isArray(value.summary) ? reasoningContentToText(value.summary) : undefined;
-}
-
-function reasoningContentToStreamingText(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value.length > 0 ? value : undefined;
-  }
-
-  if (Array.isArray(value)) {
-    const text = value
-      .map((item) => reasoningContentToStreamingText(item) ?? "")
-      .filter((item) => item.length > 0)
-      .join("\n");
-    return text.length > 0 ? text : undefined;
-  }
-
-  if (!isRecord(value)) {
-    return undefined;
-  }
-
-  const direct =
-    streamingContentToText(value.text) ?? streamingContentToText(value.content) ?? streamingContentToText(value.summary);
-  if (direct !== undefined) {
-    return direct;
-  }
-
-  return Array.isArray(value.summary) ? reasoningContentToStreamingText(value.summary) : undefined;
 }
 
 function parsePlanDefaultsFromPlan(
@@ -2475,27 +2854,6 @@ function contentToText(value: unknown): string | undefined {
   return undefined;
 }
 
-function streamingContentToText(value: unknown): string | undefined {
-  if (typeof value === "string") {
-    return value.length > 0 ? value : undefined;
-  }
-
-  if (Array.isArray(value)) {
-    let text = "";
-    for (const item of value) {
-      if (typeof item === "string") {
-        text += item;
-      } else if (isRecord(item) && typeof item.text === "string") {
-        text += item.text;
-      }
-    }
-
-    return text.length > 0 ? text : undefined;
-  }
-
-  return undefined;
-}
-
 function nonEmptyString(value: string): string | undefined {
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
@@ -2503,16 +2861,6 @@ function nonEmptyString(value: string): string | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function isoStringValue(value: unknown): string | undefined {
-  const string = stringValue(value);
-  if (!string) {
-    return undefined;
-  }
-
-  const timestamp = Date.parse(string);
-  return Number.isFinite(timestamp) ? string : undefined;
 }
 
 function positiveIntegerValue(value: unknown): number | undefined {

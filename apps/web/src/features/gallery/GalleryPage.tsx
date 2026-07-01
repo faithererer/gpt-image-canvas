@@ -23,6 +23,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import {
   SIZE_PRESETS,
   STYLE_PRESETS,
+  type GalleryBatchDeleteRequest,
   type GalleryExportRequest,
   type GalleryImageItem,
   type GalleryResponse
@@ -59,6 +60,8 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
   const [selectedItem, setSelectedItem] = useState<GalleryImageItem | null>(null);
   const [pendingDeleteItem, setPendingDeleteItem] = useState<GalleryImageItem | null>(null);
   const [deletingOutputId, setDeletingOutputId] = useState<string | null>(null);
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
+  const [isDeletingSelected, setIsDeletingSelected] = useState(false);
   const [copiedOutputId, setCopiedOutputId] = useState<string | null>(null);
   const [exportMode, setExportMode] = useState(false);
   const [selectedExportOutputIds, setSelectedExportOutputIds] = useState<string[]>([]);
@@ -108,7 +111,7 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
   }, [locale, t]);
 
   useEffect(() => {
-    if (!selectedItem && !pendingDeleteItem) {
+    if (!selectedItem && !pendingDeleteItem && !pendingBulkDelete) {
       return;
     }
 
@@ -123,6 +126,11 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
         return;
       }
 
+      if (pendingBulkDelete) {
+        setPendingBulkDelete(false);
+        return;
+      }
+
       setSelectedItem(null);
     };
 
@@ -130,7 +138,7 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [pendingDeleteItem, selectedItem]);
+  }, [pendingBulkDelete, pendingDeleteItem, selectedItem]);
 
   useEffect(() => {
     return () => {
@@ -199,6 +207,7 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
   function closeExportMode(): void {
     setExportMode(false);
     setSelectedExportOutputIds([]);
+    setPendingBulkDelete(false);
     setError("");
   }
 
@@ -278,6 +287,61 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
     }
   }
 
+  function requestDeleteSelectedItems(): void {
+    if (selectedExportOutputIds.length === 0) {
+      setError(t("galleryBulkDeleteSelectAtLeastOne"));
+      return;
+    }
+
+    setError("");
+    setPendingBulkDelete(true);
+  }
+
+  async function deleteSelectedItems(): Promise<void> {
+    if (selectedExportOutputIds.length === 0) {
+      setPendingBulkDelete(false);
+      setError(t("galleryBulkDeleteSelectAtLeastOne"));
+      return;
+    }
+
+    const request: GalleryBatchDeleteRequest = {
+      outputIds: selectedExportOutputIds
+    };
+
+    setIsDeletingSelected(true);
+    setError("");
+
+    try {
+      const response = await fetch("/api/gallery/batch", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(request)
+      });
+      if (!response.ok) {
+        throw new Error(await readGalleryError(response, locale, t));
+      }
+
+      const body = (await response.json().catch(() => undefined)) as { deletedOutputIds?: string[] } | undefined;
+      const deletedOutputIds = Array.isArray(body?.deletedOutputIds)
+        ? body.deletedOutputIds.filter((outputId): outputId is string => typeof outputId === "string")
+        : selectedExportOutputIds;
+      const deletedOutputIdSet = new Set(deletedOutputIds);
+      setItems((current) => current.filter((galleryItem) => !deletedOutputIdSet.has(galleryItem.outputId)));
+      setSelectedItem((current) => (current && deletedOutputIdSet.has(current.outputId) ? null : current));
+      setCopiedOutputId((current) => (current && deletedOutputIdSet.has(current) ? null : current));
+      setSelectedExportOutputIds((current) => current.filter((outputId) => !deletedOutputIdSet.has(outputId)));
+      setPendingBulkDelete(false);
+      deletedOutputIds.forEach(onDeleted);
+      showStatus(t("galleryBulkDeleted", { count: deletedOutputIds.length }));
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : t("galleryBulkDeleteFailed"));
+    } finally {
+      setIsDeletingSelected(false);
+    }
+  }
+
   async function copyPrompt(item: GalleryImageItem): Promise<void> {
     try {
       await writeClipboardText(item.prompt);
@@ -318,6 +382,7 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
       setItems((current) => current.filter((galleryItem) => galleryItem.outputId !== item.outputId));
       setSelectedItem((current) => (current?.outputId === item.outputId ? null : current));
       setCopiedOutputId((current) => (current === item.outputId ? null : current));
+      setSelectedExportOutputIds((current) => current.filter((outputId) => outputId !== item.outputId));
       setPendingDeleteItem(null);
       onDeleted(item.outputId);
       showStatus(t("galleryDeleted"));
@@ -387,8 +452,10 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
             filteredCount={filteredItems.length}
             filteredSelectedCount={selectedFilteredExportCount}
             isExporting={isExporting}
+            isDeleting={isDeletingSelected}
             selectedCount={selectedExportOutputIds.length}
             onClear={clearExportSelection}
+            onDelete={requestDeleteSelectedItems}
             onExport={() => void exportSelectedItems()}
             onSelectFiltered={selectFilteredExportItems}
           />
@@ -464,6 +531,15 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
           onConfirm={() => void deleteItem(pendingDeleteItem)}
         />
       ) : null}
+
+      {pendingBulkDelete ? (
+        <DeleteGallerySelectionDialog
+          count={selectedExportOutputIds.length}
+          deleting={isDeletingSelected}
+          onCancel={() => setPendingBulkDelete(false)}
+          onConfirm={() => void deleteSelectedItems()}
+        />
+      ) : null}
     </main>
   );
 }
@@ -471,17 +547,21 @@ export function GalleryPage({ onDeleted, onReuse }: GalleryPageProps) {
 function GalleryExportBar({
   filteredCount,
   filteredSelectedCount,
+  isDeleting,
   isExporting,
   selectedCount,
   onClear,
+  onDelete,
   onExport,
   onSelectFiltered
 }: {
   filteredCount: number;
   filteredSelectedCount: number;
+  isDeleting: boolean;
   isExporting: boolean;
   selectedCount: number;
   onClear: () => void;
+  onDelete: () => void;
   onExport: () => void;
   onSelectFiltered: () => void;
 }) {
@@ -515,8 +595,17 @@ function GalleryExportBar({
           {t("galleryExportClear")}
         </button>
         <button
+          className="danger-action gallery-export-bar__button h-10"
+          disabled={selectedCount === 0 || isExporting || isDeleting}
+          type="button"
+          onClick={onDelete}
+        >
+          {isDeleting ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Trash2 className="size-4" aria-hidden="true" />}
+          {t("galleryBulkDelete", { count: selectedCount })}
+        </button>
+        <button
           className="gallery-export-bar__primary h-10"
-          disabled={selectedCount === 0 || isExporting}
+          disabled={selectedCount === 0 || isExporting || isDeleting}
           type="button"
           onClick={onExport}
         >
@@ -979,6 +1068,49 @@ function DeleteGalleryDialog({
           <button className="danger-action h-10" disabled={deleting} type="button" onClick={onConfirm}>
             {deleting ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Trash2 className="size-4" aria-hidden="true" />}
             {t("galleryConfirmRemove")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteGallerySelectionDialog({
+  count,
+  deleting,
+  onCancel,
+  onConfirm
+}: {
+  count: number;
+  deleting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <div className="gallery-confirm-backdrop app-modal-backdrop" data-testid="gallery-bulk-delete-dialog" role="presentation">
+      <div
+        aria-describedby="gallery-bulk-delete-description"
+        aria-labelledby="gallery-bulk-delete-title"
+        aria-modal="true"
+        className="gallery-confirm app-modal-surface"
+        role="dialog"
+      >
+        <div className="gallery-confirm__icon">
+          <AlertTriangle className="size-5" aria-hidden="true" />
+        </div>
+        <div className="gallery-confirm__copy">
+          <h2 id="gallery-bulk-delete-title">{t("galleryConfirmBulkDeleteTitle", { count })}</h2>
+          <p id="gallery-bulk-delete-description">{t("galleryConfirmBulkDeleteBody", { count })}</p>
+        </div>
+        <div className="gallery-confirm__actions">
+          <button className="secondary-action h-10" disabled={deleting} type="button" onClick={onCancel}>
+            {t("commonCancel")}
+          </button>
+          <button className="danger-action h-10" disabled={deleting || count === 0} type="button" onClick={onConfirm}>
+            {deleting ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : <Trash2 className="size-4" aria-hidden="true" />}
+            {t("galleryConfirmBulkRemove", { count })}
           </button>
         </div>
       </div>

@@ -21,13 +21,24 @@ export const SIZE_PRESETS: SizePreset[] = [
   { id: "square-1k", label: "Square 1K", width: 1024, height: 1024, description: "Avatar and social image" },
   { id: "poster-portrait", label: "Portrait poster", width: 1024, height: 1536, description: "Poster, cover, and mobile vertical image" },
   { id: "poster-landscape", label: "Landscape poster", width: 1536, height: 1024, description: "Wide cover and desktop image" },
-  { id: "story-9-16", label: "Story 9:16", width: 1088, height: 1920, description: "Short video cover and story image" },
-  { id: "video-16-9", label: "Video 16:9", width: 1920, height: 1088, description: "Video cover and presentation image" },
-  { id: "wide-2k", label: "Wide 2K", width: 2560, height: 1440, description: "Display page and wide composition" },
-  { id: "portrait-2k", label: "Portrait 2K", width: 1440, height: 2560, description: "High-resolution portrait image" },
+  { id: "story-9-16", label: "Story 9:16", width: 1024, height: 1824, description: "Short video cover and story image" },
+  { id: "video-16-9", label: "Video 16:9", width: 1824, height: 1024, description: "Video cover and presentation image" },
+  { id: "ratio-4-3-1k", label: "4:3 1K", width: 1360, height: 1024, description: "Classic landscape 1K image" },
+  { id: "ratio-3-4-1k", label: "3:4 1K", width: 1024, height: 1360, description: "Classic portrait 1K image" },
+  { id: "wide-2k", label: "Wide 2K", width: 2048, height: 1152, description: "Display page and wide composition" },
+  { id: "portrait-2k", label: "Portrait 2K", width: 1152, height: 2048, description: "High-resolution portrait image" },
   { id: "square-2k", label: "Square 2K", width: 2048, height: 2048, description: "High-resolution square image" },
+  { id: "ratio-4-3-2k", label: "4:3 2K", width: 2048, height: 1536, description: "Classic landscape 2K image" },
+  { id: "ratio-3-4-2k", label: "3:4 2K", width: 1536, height: 2048, description: "Classic portrait 2K image" },
+  { id: "ratio-3-2-2k", label: "3:2 2K", width: 2016, height: 1344, description: "Photo landscape 2K image" },
+  { id: "ratio-2-3-2k", label: "2:3 2K", width: 1344, height: 2016, description: "Photo portrait 2K image" },
+  { id: "square-4k", label: "Square 4K", width: 2880, height: 2880, description: "Large square display image" },
   { id: "portrait-4k", label: "Portrait 4K", width: 2160, height: 3840, description: "Large portrait display image" },
-  { id: "wide-4k", label: "Wide 4K", width: 3840, height: 2160, description: "Large display image" }
+  { id: "wide-4k", label: "Wide 4K", width: 3840, height: 2160, description: "Large display image" },
+  { id: "ratio-4-3-4k", label: "4:3 4K", width: 2880, height: 2160, description: "Classic landscape 4K image" },
+  { id: "ratio-3-4-4k", label: "3:4 4K", width: 2160, height: 2880, description: "Classic portrait 4K image" },
+  { id: "ratio-3-2-4k", label: "3:2 4K", width: 3264, height: 2176, description: "Photo landscape 4K image" },
+  { id: "ratio-2-3-4k", label: "2:3 4K", width: 2176, height: 3264, description: "Photo portrait 4K image" }
 ];
 
 export const STYLE_PRESETS = [
@@ -82,11 +93,20 @@ export interface AssetMetadataResponse extends ImageSize {
 }
 
 export function resolutionTierForSize(size: ImageSize): ResolutionTier {
-  const longestSide = Math.max(size.width, size.height);
-  if (longestSide >= 3840) {
+  const matchingPreset = SIZE_PRESETS.find((preset) => preset.width === size.width && preset.height === size.height);
+  if (matchingPreset?.label.includes("4K")) {
     return "4K";
   }
-  if (longestSide >= 2048) {
+  if (matchingPreset?.label.includes("2K")) {
+    return "2K";
+  }
+
+  const longestSide = Math.max(size.width, size.height);
+  const shortestSide = Math.min(size.width, size.height);
+  if (longestSide >= 2880 || shortestSide >= 2160) {
+    return "4K";
+  }
+  if (longestSide >= 1920 || shortestSide >= 1440) {
     return "2K";
   }
   return "1K";

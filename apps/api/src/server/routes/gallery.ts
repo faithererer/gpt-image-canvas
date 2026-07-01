@@ -1,8 +1,14 @@
 import type { Hono } from "hono";
-import type { GalleryExportRequest } from "../../domain/contracts.js";
+import type { GalleryAssetDeleteRequest, GalleryBatchDeleteRequest, GalleryExportRequest } from "../../domain/contracts.js";
 import { createZipStream, prepareZipFiles, type ZipFileInput } from "../../domain/assets/zip.js";
 import { getStoredAssetFile } from "../../domain/generation/image-generation.js";
-import { deleteGalleryOutput, getGalleryExportAssets, getGalleryImages } from "../../domain/project/project-store.js";
+import {
+  deleteGalleryOutput,
+  deleteGalleryOutputs,
+  deleteGalleryOutputsByAssetIds,
+  getGalleryExportAssets,
+  getGalleryImages
+} from "../../domain/project/project-store.js";
 import { downloadFileName, errorResponse } from "../http/errors.js";
 
 export function registerGalleryRoutes(app: Hono): void {
@@ -47,6 +53,39 @@ export function registerGalleryRoutes(app: Hono): void {
     }
   });
 
+  app.delete("/api/gallery/batch", async (c) => {
+    const parsed = await parseGalleryOutputIdsRequest(c.req.raw, {
+      emptyCode: "gallery_delete_empty",
+      emptyMessage: "Gallery delete requires at least one image.",
+      invalidMessage: "Gallery delete requires outputIds."
+    });
+    if (!parsed.ok) {
+      return c.json(errorResponse(parsed.code, parsed.message), 400);
+    }
+
+    const deletedOutputIds = deleteGalleryOutputs(parsed.outputIds);
+    if (deletedOutputIds.length === 0) {
+      return c.json(errorResponse("not_found", "Gallery image records not found."), 404);
+    }
+
+    return c.json({
+      ok: true,
+      deletedOutputIds
+    });
+  });
+
+  app.delete("/api/gallery/assets", async (c) => {
+    const parsed = await parseGalleryAssetIdsRequest(c.req.raw);
+    if (!parsed.ok) {
+      return c.json(errorResponse(parsed.code, parsed.message), 400);
+    }
+
+    return c.json({
+      ok: true,
+      deletedOutputIds: deleteGalleryOutputsByAssetIds(parsed.assetIds)
+    });
+  });
+
   app.delete("/api/gallery/:outputId", (c) => {
     const deleted = deleteGalleryOutput(c.req.param("outputId"));
     if (!deleted) {
@@ -59,7 +98,7 @@ export function registerGalleryRoutes(app: Hono): void {
   });
 }
 
-type GalleryExportParseResult =
+type GalleryOutputIdsParseResult =
   | {
       ok: true;
       outputIds: string[];
@@ -70,7 +109,67 @@ type GalleryExportParseResult =
       message: string;
     };
 
-async function parseGalleryExportRequest(request: Request): Promise<GalleryExportParseResult> {
+type GalleryAssetIdsParseResult =
+  | {
+      ok: true;
+      assetIds: string[];
+    }
+  | {
+      ok: false;
+      code: string;
+      message: string;
+    };
+
+async function parseGalleryExportRequest(request: Request): Promise<GalleryOutputIdsParseResult> {
+  return parseGalleryOutputIdsRequest(request, {
+    emptyCode: "gallery_export_empty",
+    emptyMessage: "Gallery export requires at least one image.",
+    invalidMessage: "Gallery export requires outputIds."
+  });
+}
+
+async function parseGalleryAssetIdsRequest(request: Request): Promise<GalleryAssetIdsParseResult> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return {
+      ok: false,
+      code: "invalid_json",
+      message: "Request body must be valid JSON."
+    };
+  }
+
+  if (!isRecord(body) || !Array.isArray(body.assetIds)) {
+    return {
+      ok: false,
+      code: "invalid_gallery_asset_delete_request",
+      message: "Gallery asset delete requires assetIds."
+    };
+  }
+
+  const assetIdsRequest: GalleryAssetDeleteRequest = {
+    assetIds: body.assetIds.filter((assetId): assetId is string => typeof assetId === "string")
+  };
+  const assetIds = normalizeIds(assetIdsRequest.assetIds);
+  if (assetIds.length === 0) {
+    return {
+      ok: false,
+      code: "gallery_asset_delete_empty",
+      message: "Gallery asset delete requires at least one asset."
+    };
+  }
+
+  return {
+    ok: true,
+    assetIds
+  };
+}
+
+async function parseGalleryOutputIdsRequest(
+  request: Request,
+  messages: { emptyCode: string; emptyMessage: string; invalidMessage: string }
+): Promise<GalleryOutputIdsParseResult> {
   let body: unknown;
   try {
     body = await request.json();
@@ -86,19 +185,19 @@ async function parseGalleryExportRequest(request: Request): Promise<GalleryExpor
     return {
       ok: false,
       code: "invalid_gallery_export_request",
-      message: "Gallery export requires outputIds."
+      message: messages.invalidMessage
     };
   }
 
-  const exportRequest: GalleryExportRequest = {
+  const outputIdsRequest: GalleryExportRequest | GalleryBatchDeleteRequest = {
     outputIds: body.outputIds.filter((outputId): outputId is string => typeof outputId === "string")
   };
-  const outputIds = normalizeOutputIds(exportRequest.outputIds);
+  const outputIds = normalizeIds(outputIdsRequest.outputIds);
   if (outputIds.length === 0) {
     return {
       ok: false,
-      code: "gallery_export_empty",
-      message: "Gallery export requires at least one image."
+      code: messages.emptyCode,
+      message: messages.emptyMessage
     };
   }
 
@@ -108,9 +207,9 @@ async function parseGalleryExportRequest(request: Request): Promise<GalleryExpor
   };
 }
 
-function normalizeOutputIds(value: unknown[]): string[] {
+function normalizeIds(value: unknown[]): string[] {
   const seen = new Set<string>();
-  const outputIds: string[] = [];
+  const ids: string[] = [];
   for (const item of value) {
     if (typeof item !== "string") {
       continue;
@@ -122,10 +221,10 @@ function normalizeOutputIds(value: unknown[]): string[] {
     }
 
     seen.add(outputId);
-    outputIds.push(outputId);
+    ids.push(outputId);
   }
 
-  return outputIds;
+  return ids;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

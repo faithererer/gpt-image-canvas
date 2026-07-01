@@ -969,6 +969,16 @@
   scroll-behavior: auto;
 }
 
+.agent-transcript,
+.agent-history-detail,
+.agent-history-transcript,
+.agent-message,
+.agent-message__content,
+.agent-thinking-details__content {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 .agent-message {
   flex: 0 0 auto;
   width: min(100%, 23.25rem);

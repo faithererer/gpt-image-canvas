@@ -15,14 +15,16 @@ mkdirSync(dataDir, { recursive: true });
 
 async function main(): Promise<void> {
   try {
-    const [{ app, agentWebSocketServer }, { closeDatabase }, agentSession, agentConversationStore] = await Promise.all([
+    const [{ app, agentWebSocketServer }, { closeDatabase }, agentSession, agentConversationStore, agentSkillStore] = await Promise.all([
       import("../index.js"),
       import("../infrastructure/database.js"),
       import("../domain/agent/websocket-session.js"),
-      import("../domain/agent/conversation-store.js")
+      import("../domain/agent/conversation-store.js"),
+      import("../domain/agent/skill-store.js")
     ]);
     const { closeAllAgentSessions, resolveImplicitAgentContextReferences } = agentSession;
     const { getAgentConversationContext, saveAgentConversationContext } = agentConversationStore;
+    const { resolveAvailablePlanningSkillLoadout } = agentSkillStore;
 
     let server: ReturnType<typeof serve> | undefined;
     const port = await new Promise<number>((resolvePort) => {
@@ -44,7 +46,7 @@ async function main(): Promise<void> {
       await smokeAgentWebSocket(port);
       await smokeAgentConversations(app, port, { getAgentConversationContext, saveAgentConversationContext });
       await smokeAgentConfig(app);
-      await smokeAgentSkills(app);
+      await smokeAgentSkills(app, { resolveAvailablePlanningSkillLoadout });
     } finally {
       closeAllAgentSessions("agent_smoke_shutdown");
       agentWebSocketServer.close();
@@ -370,7 +372,12 @@ async function smokeAgentConfig(app: RequestApp): Promise<void> {
   expect(preserved.body.supportsVision === false, "preserved save updates supportsVision");
 }
 
-async function smokeAgentSkills(app: RequestApp): Promise<void> {
+async function smokeAgentSkills(
+  app: RequestApp,
+  skillStore: {
+    resolveAvailablePlanningSkillLoadout: typeof import("../domain/agent/skill-store.js").resolveAvailablePlanningSkillLoadout;
+  }
+): Promise<void> {
   const list = await requestJson(app, "/api/agent-skills");
   expect(list.response.status === 200, "Agent skill list returns 200");
   expect(Array.isArray(list.body.skills), "Agent skill list returns skills");
@@ -449,6 +456,59 @@ async function smokeAgentSkills(app: RequestApp): Promise<void> {
   });
   expect(edited.response.status === 200, "custom Agent skill edit returns 200");
   expect(isRecord(edited.body.skill) && edited.body.skill.fileCount === 2, "custom Agent skill file edit persists");
+
+  const styleSkillDescription =
+    "Extract reusable style prompts when the user asks to analyze style, reverse-engineer prompts, create prompt templates, or transfer an image aesthetic.";
+  const styleSkill = await requestJson(app, "/api/agent-skills", {
+    method: "POST",
+    body: {
+      slug: "image-style-prompt-extractor",
+      name: "image-style-prompt-extractor",
+      description: styleSkillDescription,
+      enabled: true,
+      triggerMode: "auto",
+      triggerKeywords: [],
+      files: [
+        {
+          path: "SKILL.md",
+          content: `---\nname: image-style-prompt-extractor\ndescription: ${styleSkillDescription}\n---\n# Image Style Prompt Extractor`
+        }
+      ]
+    }
+  });
+  expect(styleSkill.response.status === 201, "style metadata skill create returns 201");
+
+  const kidsSkillDescription =
+    "Generate safe, premium children portrait and kids campaign image prompts. Use when Codex is asked to create or refine prompts for children's portraits, kids fashion editorials, childhood campaign posters, Korean kids photography, kawaii scrapbook posters, playful studio portraits, anime-style child subject transformations, or child-brand visual art direction.";
+  const kidsSkill = await requestJson(app, "/api/agent-skills", {
+    method: "POST",
+    body: {
+      slug: "kids-portrait-generator",
+      name: "kids-portrait-generator",
+      description: kidsSkillDescription,
+      enabled: true,
+      triggerMode: "auto",
+      triggerKeywords: [],
+      files: [
+        {
+          path: "SKILL.md",
+          content: `---\nname: kids-portrait-generator\ndescription: ${kidsSkillDescription}\n---\n# Kids Portrait Generator`
+        }
+      ]
+    }
+  });
+  expect(kidsSkill.response.status === 201, "kids portrait metadata skill create returns 201");
+
+  const availableLoadout = skillStore.resolveAvailablePlanningSkillLoadout();
+  const availableSlugs = availableLoadout.skills.map((skill) => skill.slug);
+  expect(
+    availableSlugs.includes("kids-portrait-generator"),
+    "DeepAgent runtime loadout exposes the kids portrait skill for model-side matching"
+  );
+  expect(
+    availableSlugs.includes("image-style-prompt-extractor"),
+    "DeepAgent runtime loadout exposes the style extractor skill for model-side matching"
+  );
 
   const importedMarkdown = await requestMultipart(app, "/api/agent-skills/import", formDataWithFile(
     new File(

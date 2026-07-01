@@ -41,6 +41,7 @@ import { getActiveCloudStorageConfig } from "../storage/storage-config.js";
 const BATCH_CONCURRENCY = 2;
 const MAX_REFERENCE_IMAGE_BYTES = 50 * 1024 * 1024;
 const SUPPORTED_REFERENCE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp"]);
+const TRANSIENT_PROVIDER_RETRY_DELAYS_MS = [1500, 4000] as const;
 const INTERRUPTED_GENERATION_ERROR = "Generation was interrupted by an API restart. Rerun it from history.";
 const CANCELLED_GENERATION_ERROR = "This generation was cancelled.";
 const localAssetStorage = new LocalAssetStorageAdapter();
@@ -418,11 +419,15 @@ async function generateSingleOutput(input: ImageProviderInput, provider: ImagePr
 
   try {
     throwIfAborted(signal);
-    const result = await provider.generate(
-      {
-        ...input,
-        count: 1
-      },
+    const result = await callProviderWithRetry(
+      () =>
+        provider.generate(
+          {
+            ...input,
+            count: 1
+          },
+          signal
+        ),
       signal
     );
     throwIfAborted(signal);
@@ -458,11 +463,15 @@ async function editSingleOutput(input: EditImageProviderInput, provider: ImagePr
 
   try {
     throwIfAborted(signal);
-    const result = await provider.edit(
-      {
-        ...input,
-        count: 1
-      },
+    const result = await callProviderWithRetry(
+      () =>
+        provider.edit(
+          {
+            ...input,
+            count: 1
+          },
+          signal
+        ),
       signal
     );
     throwIfAborted(signal);
@@ -1054,6 +1063,68 @@ async function mapWithConcurrency<T, TResult>(
 
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
   return results;
+}
+
+async function callProviderWithRetry<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= TRANSIENT_PROVIDER_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      throwIfAborted(signal);
+      return await operation();
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted || !isTransientProviderError(error)) {
+        throw error;
+      }
+
+      lastError = error;
+      const delayMs = TRANSIENT_PROVIDER_RETRY_DELAYS_MS[attempt];
+      if (delayMs === undefined) {
+        break;
+      }
+
+      await delay(delayMs, signal);
+    }
+  }
+
+  throw lastError;
+}
+
+function isTransientProviderError(error: unknown): boolean {
+  if (!(error instanceof ProviderError)) {
+    return false;
+  }
+
+  if (error.status === 429 || error.status === 503 || error.status === 504) {
+    return true;
+  }
+
+  return (
+    error.status === 502 &&
+    /stream disconnected|connection|timeout|temporar|upstream/iu.test(error.message)
+  );
+}
+
+async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+
+  await new Promise<void>((resolve, reject) => {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const abort = (): void => {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    };
+
+    timeoutId = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function errorToMessage(error: unknown): string {
