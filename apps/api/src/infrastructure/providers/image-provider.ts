@@ -1,5 +1,5 @@
 import OpenAI, { APIConnectionTimeoutError, APIError, APIUserAbortError, toFile } from "openai";
-import type { Image, ImageEditParamsNonStreaming, ImageGenerateParamsNonStreaming, ImagesResponse } from "openai/resources/images";
+import type { ImageEditParamsNonStreaming, ImageGenerateParamsNonStreaming, ImagesResponse } from "openai/resources/images";
 import {
   IMAGE_MODEL,
   type ImageQuality,
@@ -80,6 +80,8 @@ type FlexibleImageGenerateParams = Omit<ImageGenerateParamsNonStreaming, "size">
 type FlexibleImageEditParams = Omit<ImageEditParamsNonStreaming, "size"> & {
   size: string;
 };
+
+type ProviderImagesResponse = ImagesResponse | string;
 
 export function getOpenAIImageProviderConfig():
   | {
@@ -696,16 +698,19 @@ function isAbortError(error: unknown): error is Error {
 }
 
 async function normalizeProviderResponse(
-  response: ImagesResponse,
+  rawResponse: ProviderImagesResponse,
   sizeApiValue: string,
   model: string,
   signal?: AbortSignal
 ): Promise<ProviderResult> {
-  if (!Array.isArray(response.data) || response.data.length === 0) {
+  const response = parseProviderImagesResponse(rawResponse);
+  const data = isRecord(response) ? response.data : undefined;
+
+  if (!Array.isArray(data) || data.length === 0) {
     throw new ProviderError("unsupported_provider_behavior", "OpenAI 图像服务没有返回图像结果。", 502);
   }
 
-  const images = await Promise.all(response.data.map((item) => providerImageFromResponseItem(item, signal)));
+  const images = await Promise.all(data.map((item) => providerImageFromResponseItem(item, signal)));
 
   if (images.some((image) => !image.b64Json)) {
     throw new ProviderError("unsupported_provider_behavior", "OpenAI 图像服务没有返回 base64 图像数据。", 502);
@@ -718,7 +723,34 @@ async function normalizeProviderResponse(
   };
 }
 
-async function providerImageFromResponseItem(item: Image, signal?: AbortSignal): Promise<ProviderImage> {
+function parseProviderImagesResponse(response: ProviderImagesResponse): unknown {
+  if (typeof response !== "string") {
+    return response;
+  }
+
+  const responseText = response.trim();
+  if (!responseText.startsWith("{") && !responseText.startsWith("[")) {
+    return response;
+  }
+
+  try {
+    return JSON.parse(responseText) as unknown;
+  } catch {
+    return response;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+async function providerImageFromResponseItem(item: unknown, signal?: AbortSignal): Promise<ProviderImage> {
+  if (!isRecord(item)) {
+    return {
+      b64Json: ""
+    };
+  }
+
   if (typeof item.b64_json === "string" && item.b64_json) {
     return {
       b64Json: item.b64_json
