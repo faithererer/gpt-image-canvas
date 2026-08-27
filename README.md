@@ -79,6 +79,8 @@ CODEX_RESPONSES_MODEL=gpt-5.5
 Leave `OPENAI_BASE_URL` empty for the official OpenAI API. Set it to an OpenAI-compatible `/v1` endpoint when using another provider, and set `OPENAI_IMAGE_MODEL` if that endpoint expects a different image model name.
 When using Codex login, `CODEX_RESPONSES_MODEL` controls the mainline Responses model for the ChatGPT OAuth bridge; `OPENAI_IMAGE_MODEL` remains the image-generation tool model.
 
+The canvas uses tldraw's supported development mode on localhost/HTTP when `VITE_TLDRAW_LICENSE_KEY` is blank. For a deployment that requires a tldraw hobby or commercial license, set `VITE_TLDRAW_LICENSE_KEY` before running `pnpm build` (or as a Docker build argument). This value is embedded in the public web bundle, so changing it requires a rebuild. The GHCR workflow reads the optional `TLDRAW_LICENSE_KEY` repository secret.
+
 You can also open the top-right `配置` dialog and save one local OpenAI-compatible provider. Local keys are stored in SQLite under `DATA_DIR`, returned only as masked values, and preserved until you enter a replacement key.
 
 ## Routes

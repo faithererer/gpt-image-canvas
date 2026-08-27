@@ -173,8 +173,7 @@ const shapeUtils = [GenerationPlaceholderShapeUtil, AgentPlanNodeShapeUtil];
 const tldrawOptions = {
   debouncedZoomThreshold: 80
 } satisfies Partial<TldrawOptions>;
-const TLDRAW_LICENSE_KEY =
-  "tldraw-2026-08-08/WyJ3dGU4bldjRyIsWyIqIl0sMTYsIjIwMjYtMDgtMDgiXQ.Xt7lTydUhMnKfHfp+g8Mrs9gtJjlB8uPyYMniFEfRfruCYdYEl9J0uZl0lMAf6o7GdDB1zXOVhWLFAipssI6Cw";
+const TLDRAW_LICENSE_KEY = import.meta.env.VITE_TLDRAW_LICENSE_KEY?.trim() || undefined;
 const TLDRAW_USER_ID = "gpt-image-canvas-local-user";
 
 function tldrawLocaleForLocale(locale: Locale): NonNullable<TLUserPreferences["locale"]> {

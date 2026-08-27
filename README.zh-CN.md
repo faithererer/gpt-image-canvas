@@ -79,6 +79,8 @@ CODEX_RESPONSES_MODEL=gpt-5.5
 使用官方 OpenAI API 时留空 `OPENAI_BASE_URL`。如果使用其他 OpenAI 兼容服务，将它设置为兼容的 `/v1` 端点；如果该端点需要不同的图像模型名，修改 `OPENAI_IMAGE_MODEL`。
 使用 Codex 登录时，`CODEX_RESPONSES_MODEL` 控制 ChatGPT OAuth 桥接使用的主 Responses 模型；`OPENAI_IMAGE_MODEL` 仍然是传给图像生成工具的图像模型。
 
+`VITE_TLDRAW_LICENSE_KEY` 留空时，画布会在 localhost/HTTP 上使用 tldraw 官方支持的开发模式。需要 tldraw hobby 或 commercial 授权的部署，请在执行 `pnpm build` 前设置 `VITE_TLDRAW_LICENSE_KEY`（Docker 部署时作为构建参数传入）。该值会嵌入公开的 Web bundle，修改后必须重新构建。GHCR 发布工作流会读取可选的仓库 secret `TLDRAW_LICENSE_KEY`。
+
 也可以打开右上角 `配置` 弹窗，保存一个本地 OpenAI 兼容 provider。本地 key 会存储在 `DATA_DIR` 下的 SQLite 数据库中，读取时只返回掩码，并会一直保留到你输入新 key 替换它。
 
 ## 路由说明
