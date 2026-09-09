@@ -70,6 +70,7 @@ jobs:
             APT_MIRROR=http://deb.debian.org/debian
             APT_SECURITY_MIRROR=http://deb.debian.org/debian-security
             NPM_CONFIG_REGISTRY=https://registry.npmjs.org
+            VITE_TLDRAW_LICENSE_KEY=${{ secrets.TLDRAW_LICENSE_KEY }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
